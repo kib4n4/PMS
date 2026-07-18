@@ -1,3 +1,5 @@
+# backend/config/urls.py
+
 """
 URL configuration for config project.
 
@@ -26,7 +28,9 @@ def healthz(request):
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('healthz/', healthz),
+    path('api/', include('leasing.urls')),
     # Public webhook routes — kept on a distinct path group so host Nginx
     # can apply a stricter/separate rate limit, per the design doc.
     path('webhooks/', include('billing.webhook_urls')),
+    path('webhooks/', include('messaging.webhook_urls')),
 ]

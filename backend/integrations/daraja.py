@@ -1,3 +1,5 @@
+# backend/integrations/daraja.py
+
 """
 Safaricom Daraja API client — STUBBED.
 

@@ -1,3 +1,5 @@
+# backend/integrations/whatsapp.py
+
 """
 Meta WhatsApp Cloud API client — STUBBED, same reasoning as daraja.py:
 no network path to graph.facebook.com from this sandbox, and no real

@@ -1,4 +1,5 @@
-    {
+{
+  "_comment": "frontend/package.json",
   "name": "pms-frontend",
   "private": true,
   "scripts": {
