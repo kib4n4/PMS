@@ -37,6 +37,7 @@ ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
 # Application definition
 
 INSTALLED_APPS = [
+    'oauth2_provider',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -44,6 +45,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    'corsheaders',
     'django_celery_beat',
     # Project apps — one per core module in the design doc.
     'accounts',
@@ -59,14 +61,31 @@ INSTALLED_APPS = [
 ]
 
 AUTH_USER_MODEL = 'accounts.User'
+OAUTH2_PROVIDER = {
+    'CLIENT_ID_GENERATOR': 'oauth2_provider.generators.ClientIdGenerator',
+    'CLIENT_SECRET_GENERATOR': 'oauth2_provider.generators.ClientSecretGenerator',
+    'ACCESS_TOKEN_EXPIRE_SECONDS': 3600, # 1 hour
+    'REFRESH_TOKEN_EXPIRE_SECONDS': 2592000,  # 30 days
+    'ROTATE_REFRESH_TOKEN': True,
+    'PKCE_REQUIRED': True,
+    'PKCE_METHODS': ['plain', 'S256'],
+    'OAUTH2_VALIDATOR_CLASS': 'accounts.oauth.PMSOAuth2Validator',
+    'SCOPES': {
+        'read': 'Read access to resources',
+        'write': 'Write access to resources',
+        'tenants': 'Manage tenants and leases',
+        'properties': 'Read/manage properties and units',
+        'billing': ' Read/manage payments and invoices',
+    },
+}
 
 REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
     'DEFAULT_AUTHENTICATION_CLASSES': [
+        'oauth2_provider.contrib.rest_framework.OAuth2Authentication',
         'rest_framework.authentication.SessionAuthentication',
-        'rest_framework.authentication.TokenAuthentication',
     ],
 }
 
@@ -81,6 +100,7 @@ CELERY_TIMEZONE = 'UTC'
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -168,3 +188,7 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+
+CORS_ALLOWED_ORIGINS = ["http://localhost:3000"]
+
+LOGIN_URL = '/accounts/login/'

@@ -103,3 +103,24 @@ docker compose up --build
 Backend will be reachable inside the Docker network on `backend:8000`
 (host Nginx, not part of this compose file, handles public TLS
 termination and proxying per the design doc).
+
+## OAuth 2.0 (Authorization server + Resource server)
+
+This project includes a django-oauth-toolkit (DOT) based OAuth 2.0 provider for third-party API access.
+
+Quick notes:
+- Authorization endpoints are mounted at /o/ (DOT's URLs). Use the Authorization Code + PKCE flow for delegated access and Client Credentials for M2M integrations.
+- Install dependencies: pip install -r backend/requirements.txt (DOT and CORS are included).
+- Settings: OAUTH2_PROVIDER is configured in ackend/config/settings.py. Session-authenticated users continue to work; OAuth tokens require ead for GET and write for mutating requests.
+- Client registration: staff can create confidential Applications in Django admin (oauth2_provider.Application) or logged-in users can manage their own apps at /o/applications/.
+
+DB-driven credentials for Daraja/WhatsApp
+
+- Per-landlord Daraja credentials are stored in LandlordDarajaCredential (secret refs, not raw values). The integration client (integrations/daraja.py) must resolve secrets via a secrets manager before making real HTTP calls.
+- Per-landlord WhatsApp credential references are stored in LandlordWhatsAppCredential (new model). integrations/whatsapp.py provides a or_landlord constructor; implement secret resolution against your secrets manager in production.
+
+Docker / Production readiness
+
+- docker-compose.yml defines postgres, redis, backend, worker, and beat services. Host Nginx should terminate TLS and proxy into the backend container (the backend does not publish host ports by default).
+- Use a secrets manager in production; environment variables in .env must reference secret paths only where appropriate.
+

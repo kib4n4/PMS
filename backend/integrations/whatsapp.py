@@ -15,6 +15,19 @@ class WhatsAppClient:
         self.phone_number_id = phone_number_id
 
     @classmethod
+    def for_landlord(cls, landlord_credential) -> "WhatsAppClient":
+        """Build a WhatsApp client scoped to a specific landlord's credentials.
+
+        `landlord_credential` should be a landlords.models.LandlordWhatsAppCredential
+        instance. Real implementation will resolve the secret refs via the
+        configured secrets manager; for now this is a stub that returns the
+        placeholder shape used elsewhere in the codebase.
+        """
+        # TODO(M3): resolve landlord_credential.access_token_secret_ref and
+        # landlord_credential.phone_number_id_secret_ref via the secrets manager.
+        return cls(access_token="STUB", phone_number_id="STUB")
+
+    @classmethod
     def default(cls) -> "WhatsAppClient":
         # TODO(M3): resolve access_token/phone_number_id via secrets manager.
         return cls(access_token="STUB", phone_number_id="STUB")

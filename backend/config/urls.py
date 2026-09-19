@@ -28,6 +28,8 @@ def healthz(request):
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('healthz/', healthz),
+    path('o/', include(('oauth2_provider.urls', 'oauth2_provider'))),
+    path('accounts/', include('accounts.urls')),
     path('api/', include('leasing.urls')),
     # Public webhook routes — kept on a distinct path group so host Nginx
     # can apply a stricter/separate rate limit, per the design doc.

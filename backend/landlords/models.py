@@ -89,3 +89,30 @@ class LandlordDarajaCredential(models.Model):
 
     def __str__(self):
         return f"{self.landlord.full_name} — {self.shortcode} ({self.status})"
+class LandlordWhatsAppCredential(models.Model):
+    """Per-landlord WhatsApp Cloud API credential references.
+
+    Stores secret references (secrets-manager key paths) for the access token
+    and phone_number_id. The real secrets must be resolved via a secrets
+    manager in production; this model only stores the reference paths.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    landlord = models.OneToOneField(
+        Landlord, on_delete=models.CASCADE, related_name="whatsapp_credential"
+    )
+    environment = models.CharField(
+        max_length=10, choices=[("sandbox", "Sandbox"), ("live", "Live")], default="sandbox"
+    )
+    access_token_secret_ref = models.CharField(
+        max_length=255, help_text="Secrets-manager key path for the WhatsApp access token"
+    )
+    phone_number_id_secret_ref = models.CharField(
+        max_length=255, help_text="Secrets-manager key path for the phone number id"
+    )
+    status = models.CharField(max_length=40, choices=OnboardingStatus.choices, default=OnboardingStatus.PENDING)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.landlord.full_name} — WhatsApp ({self.status})"
