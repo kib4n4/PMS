@@ -23,6 +23,8 @@ Two distinct credential contexts, per the design doc:
 from dataclasses import dataclass
 from typing import Optional
 
+from integrations.models import Provider, ProviderCredential
+
 
 @dataclass
 class STKPushResult:
@@ -66,8 +68,24 @@ class DarajaClient:
     @classmethod
     def for_platform(cls) -> "DarajaClient":
         """Build a client for the platform's OWN Daraja app — used for
-        FeeInvoice collection and Reseller/Investor B2C payouts only."""
-        # TODO(M2): resolve platform Daraja credentials via secrets manager.
+        FeeInvoice collection and Reseller/Investor B2C payouts only.
+
+        Try to read a platform-level ProviderCredential for daraja if present
+        and use its structured OAuth2 fields (consumer key/secret)."""
+        try:
+            cred = ProviderCredential.get_active(Provider.DARAJA, landlord=None)
+        except ProviderCredential.DoesNotExist:
+            cred = None
+
+        if cred and getattr(cred, 'auth_type', None) == cred.AuthType.OAUTH2:
+            creds = cred.get_credentials()
+            meta = cred.get_metadata() if hasattr(cred, 'get_metadata') else {}
+            consumer_key = creds.get('client_id')
+            consumer_secret = creds.get('client_secret')
+            shortcode = meta.get('shortcode', 'STUB')
+            return cls(consumer_key=consumer_key, consumer_secret=consumer_secret, shortcode=shortcode)
+
+        # Fallback to stubbed secrets until real secrets manager integration exists
         return cls(consumer_key="STUB", consumer_secret="STUB", shortcode="STUB")
 
     def initiate_stk_push(self, phone_number: str, amount: str, account_reference: str) -> STKPushResult:

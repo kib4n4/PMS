@@ -1,0 +1,9 @@
+/* Global admin unfold CSS */
+.fold-toggle{background:transparent;border:none;padding:0 6px;margin-right:8px;color:#6b7280;font-size:14px;cursor:pointer}
+.fold-toggle:focus{outline:none}
+.form-row.collapsed > *:not(label){display:none}
+.field-box.collapsed > *:not(label){display:none}
+.global-fold-toggle{background:#0ea5e9;color:#fff;border:none;padding:6px 10px;border-radius:6px;cursor:pointer}
+.global-fold-toggle:hover{opacity:0.95}
+/* minimal compatibility with earlier theme variables */
+.provider-icon svg{vertical-align:middle;color:var(--accent, #0ea5e9)}

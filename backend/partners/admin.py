@@ -1,6 +1,5 @@
-# backend/partners/admin.py
-
 from django.contrib import admin
+from unfold.admin import ModelAdmin
 
 from .models import (
     Disbursement,
@@ -13,32 +12,32 @@ from .models import (
 
 
 @admin.register(PayoutAccount)
-class PayoutAccountAdmin(admin.ModelAdmin):
+class PayoutAccountAdmin(ModelAdmin):
     list_display = ("label", "phone_number", "is_active")
 
 
 @admin.register(Reseller)
-class ResellerAdmin(admin.ModelAdmin):
+class ResellerAdmin(ModelAdmin):
     list_display = ("full_name", "payout_account", "created_at")
 
 
 @admin.register(ReferralCommissionRule)
-class ReferralCommissionRuleAdmin(admin.ModelAdmin):
+class ReferralCommissionRuleAdmin(ModelAdmin):
     list_display = ("reseller", "landlord", "rate_percent", "is_perpetual", "expires_at")
 
 
 @admin.register(Investor)
-class InvestorAdmin(admin.ModelAdmin):
+class InvestorAdmin(ModelAdmin):
     list_display = ("full_name", "payout_account", "created_at")
 
 
 @admin.register(RevenueShareAgreement)
-class RevenueShareAgreementAdmin(admin.ModelAdmin):
+class RevenueShareAgreementAdmin(ModelAdmin):
     list_display = ("investor", "organization", "basis", "rate_percent", "payout_cadence")
     list_filter = ("basis", "payout_cadence")
 
 
 @admin.register(Disbursement)
-class DisbursementAdmin(admin.ModelAdmin):
+class DisbursementAdmin(ModelAdmin):
     list_display = ("recipient_type", "reseller", "investor", "amount", "status", "created_at")
     list_filter = ("recipient_type", "status")
