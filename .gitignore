@@ -1,17 +1,18 @@
 # .gitignore
 
-/backend/venv/
-/backend/.venv/
+/backend/venv/*
+/backend/.venv/*
+/backend/staticfiles/
 /backend/__pycache__/
 /backend/**/__pycache__/
 /backend/**/migrations/__pycache__/
 /backend/db.sqlite3
 /backend/*.pyc
-.env
+.env*
 .env.local
 .env*.local
 /frontend/node_modules/
 .venv/
 /frontend/.next/
 *.log
-.DS_Storebackend/.venv/
+.DS_Store

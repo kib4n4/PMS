@@ -9,24 +9,32 @@ interface KPICardProps {
   trend?: { value: number; label: string };
   icon?: ReactNode;
   accent?: "blue" | "emerald" | "amber" | "rose";
+  /** New, optional, defaults to "quiet" — existing call sites are
+   * unaffected. "hero" is meant for exactly one card per KPI row (the
+   * screen's real headline number); everything else stays quiet. */
+  variant?: "hero" | "quiet";
 }
 
 const iconTeal: Record<NonNullable<KPICardProps["accent"]>, string> = {
   blue: "text-teal-600",
   emerald: "text-teal-600",
-  amber: "text-amber-600",
+  amber: "text-gold-600",
   rose: "text-rust-600",
 };
 
-export default function KPICard({ title, value, subtitle, trend, icon, accent }: KPICardProps) {
+export default function KPICard({ title, value, subtitle, trend, icon, accent, variant = "quiet" }: KPICardProps) {
   const dir = trend ? (trend.value > 0 ? "up" : trend.value < 0 ? "down" : "flat") : null;
-  const trendColor = dir === "up" ? "text-teal-700" : dir === "down" ? "text-rust-700" : "text-amber-700";
+  const trendColor = dir === "up" ? "text-teal-700" : dir === "down" ? "text-rust-700" : "text-gold-700";
   const iconColor = iconTeal[accent ?? "blue"];
+  const isHero = variant === "hero";
 
   return (
     <div className="rounded-xl">
       <div
-        className="relative rounded-xl border-2 border-dashed border-border bg-surface p-5 shadow-ledger"
+        className={cn(
+          "relative rounded-xl border-2 border-dashed border-border bg-surface shadow-ledger",
+          isHero ? "p-6" : "p-5",
+        )}
         style={{
           clipPath:
             "polygon(10px 0, calc(100% - 10px) 0, 100% 10px, 100% calc(100% - 10px), calc(100% - 10px) 100%, 10px 100%, 0 calc(100% - 10px), 0 10px)",
@@ -34,9 +42,16 @@ export default function KPICard({ title, value, subtitle, trend, icon, accent }:
       >
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
-            <p className="text-xs font-medium uppercase tracking-wide text-ink-600">{title}</p>
-            <p className="mt-1 font-mono text-2xl font-semibold text-ink-900 tabular-nums">{value}</p>
-            {subtitle && <p className="mt-0.5 text-xs text-ink-600">{subtitle}</p>}
+            <p className="text-xs font-medium text-ink-600">{title}</p>
+            <p
+              className={cn(
+                "mt-1.5 font-serif font-medium tabular-nums text-ink-900",
+                isHero ? "text-display-hero" : "text-display-kpi",
+              )}
+            >
+              {value}
+            </p>
+            {subtitle && <p className="mt-1 text-xs text-ink-600">{subtitle}</p>}
           </div>
           {icon && <div className={cn("flex-shrink-0", iconColor)}>{icon}</div>}
         </div>
@@ -71,5 +86,5 @@ function TrendArrow({ direction }: { direction: "up" | "down" | "flat" }) {
       </svg>
     );
   }
-  return <span className="h-3.5 w-3.5 rounded-full bg-amber-400" />;
+  return <span className="h-3.5 w-3.5 rounded-full bg-gold-400" />;
 }

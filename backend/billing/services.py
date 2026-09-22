@@ -14,7 +14,7 @@ vanish.
 from landlords.models import OnboardingStatus
 from integrations.daraja import DarajaClient
 
-from .models import STKPushRequest
+from .models import FeeInvoiceStatus, STKPushRequest
 
 
 class NoDarajaCredentialError(Exception):
@@ -27,6 +27,10 @@ class LandlordNotReadyError(Exception):
 
 class InvoiceAlreadyPaidError(Exception):
     pass
+
+
+class NoPhoneNumberError(Exception):
+    """No phone number available to send the STK Push to."""
 
 
 def initiate_invoice_payment(invoice, phone_number: str) -> STKPushRequest:
@@ -59,4 +63,35 @@ def initiate_invoice_payment(invoice, phone_number: str) -> STKPushRequest:
         merchant_request_id=result.merchant_request_id,
         phone_number=phone_number,
         amount=remaining,
+    )
+
+
+def initiate_fee_invoice_payment(fee_invoice, phone_number: str = "") -> STKPushRequest:
+    """
+    Triggers an STK Push against the PLATFORM's own shortcode (not the
+    landlord's) to collect an accumulated FeeInvoice — the reverse money
+    direction from initiate_invoice_payment (landlord -> platform, not
+    tenant -> landlord). Persists the same STKPushRequest correlation
+    record so /webhooks/mpesa/stk/callback/ (billing/tasks.py::
+    ingest_stk_callback) can resolve the eventual result back to this
+    FeeInvoice.
+    """
+    if fee_invoice.status == FeeInvoiceStatus.PAID:
+        raise InvoiceAlreadyPaidError(f"FeeInvoice {fee_invoice.reference} is already paid.")
+
+    phone_number = phone_number or fee_invoice.landlord.user.phone_number
+    if not phone_number:
+        raise NoPhoneNumberError(f"Landlord {fee_invoice.landlord_id} has no phone number on file.")
+
+    client = DarajaClient.for_platform()
+    result = client.initiate_stk_push(
+        phone_number=phone_number, amount=str(fee_invoice.total_amount), account_reference=fee_invoice.reference
+    )
+
+    return STKPushRequest.objects.create(
+        fee_invoice=fee_invoice,
+        checkout_request_id=result.checkout_request_id,
+        merchant_request_id=result.merchant_request_id,
+        phone_number=phone_number,
+        amount=fee_invoice.total_amount,
     )

@@ -1,4 +1,4 @@
-﻿# backend/Dockerfile
+# backend/Dockerfile
 
 FROM python:3.12-slim
 
@@ -15,6 +15,13 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+
+# Collects django-unfold's (and every app's) static assets for whitenoise
+# to serve — there's no nginx/static-file layer anywhere else in this
+# repo. Safe at build time: it only needs STATIC_ROOT write access, not a
+# real DJANGO_SECRET_KEY/DB connection (both have dev-safe fallbacks —
+# see config/settings.py).
+RUN python manage.py collectstatic --noinput
 
 RUN useradd -m appuser && chown -R appuser /app
 USER appuser

@@ -29,13 +29,17 @@ def healthz(request):
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('healthz/', healthz),
-    path('o/', include(('oauth2_provider.urls', 'oauth2_provider'))),
     path('accounts/', include('accounts.urls')),
     path('api/auth/', include('accounts.urls')),
     path('api/', include('leasing.urls')),
     path('api/', include('billing.urls')),
+    path('api/', include('partners.urls')),
     path('api/', include('taxes.urls')),
     path('api/', include('api_auth.urls')),
+    path('api/', include('properties.urls')),
+    path('api/', include('maintenance.urls')),
+    path('api/', include('caretakers.urls')),
+    path('api/', include('landlords.urls')),
     # API documentation — auto-generated from DRF views/serializers.
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),

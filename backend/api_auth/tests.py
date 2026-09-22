@@ -3,8 +3,10 @@
 from datetime import date
 from io import StringIO
 
-from django.core.management import call_command
-from django.test import TestCase
+from django.core.cache import cache
+from django.core.exceptions import ValidationError
+from django.core.management import CommandError, call_command
+from django.test import TestCase, override_settings
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
@@ -16,7 +18,7 @@ from landlords.models import Landlord, Organization
 from leasing.models import Lease, LeaseStatus, Tenant
 from properties.models import Property, Unit
 
-from .models import PlatformApiClient
+from .models import PlatformApiClient, Scope
 from .tokens import issue_client_credentials_token
 
 
@@ -184,3 +186,86 @@ class CreateApiClientCommandTests(TestCase):
 
         client = PlatformApiClient.objects.get(name="CLI Scoped Client")
         self.assertEqual(client.landlord_id, landlord.id)
+
+
+class ScopeValidationTests(TestCase):
+    def test_generate_rejects_unknown_scope(self):
+        with self.assertRaises(ValidationError):
+            PlatformApiClient.generate(name="Bad Scope", scopes=["not:a:real:scope"])
+
+    def test_clean_rejects_unknown_scope_on_existing_client(self):
+        client, _ = PlatformApiClient.generate(name="Acme", scopes=[Scope.INVOICES_READ])
+        client.scopes = ["invoices:delete_everything"]
+        with self.assertRaises(ValidationError):
+            client.clean()
+
+    def test_generate_accepts_registered_scopes(self):
+        client, _ = PlatformApiClient.generate(name="Acme", scopes=[Scope.INVOICES_READ, Scope.PAYMENTS_READ])
+        self.assertEqual(client.scopes, ["invoices:read", "payments:read"])
+
+
+class RotateApiClientSecretTests(TestCase):
+    def test_rotate_secret_invalidates_old_one(self):
+        client, old_secret = PlatformApiClient.generate(name="Acme", scopes=["invoices:read"])
+        new_secret = client.rotate_secret()
+
+        self.assertNotEqual(new_secret, old_secret)
+        self.assertFalse(client.verify_secret(old_secret))
+        self.assertTrue(client.verify_secret(new_secret))
+        # client_id/scopes/landlord untouched by rotation.
+        self.assertEqual(PlatformApiClient.objects.get(pk=client.pk).scopes, ["invoices:read"])
+
+    def test_rotate_api_client_secret_command(self):
+        client, old_secret = PlatformApiClient.generate(name="CLI Rotate", scopes=["invoices:read"])
+        out = StringIO()
+        call_command("rotate_api_client_secret", "--client-id", client.client_id, stdout=out)
+
+        client.refresh_from_db()
+        self.assertFalse(client.verify_secret(old_secret))
+        self.assertIn("client_secret:", out.getvalue())
+
+    def test_rotate_unknown_client_id_errors(self):
+        with self.assertRaises(CommandError):
+            call_command("rotate_api_client_secret", "--client-id", "pms_doesnotexist")
+
+
+@override_settings(
+    CACHES={
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "test-token-endpoint-throttle",
+        }
+    }
+)
+class TokenEndpointThrottleTests(APITestCase):
+    """POST /api/oauth/token/ is a credential-guessing target with no
+    other rate limit in front of it — see api_views.TokenEndpointThrottle.
+
+    Runs against its own dedicated cache LOCATION (not the shared
+    "default" every other test also reads/writes) — the request-count
+    history this throttle keeps is wall-clock-timestamped, so sharing a
+    cache backend with unrelated tests makes this assertion's outcome
+    depend on full-suite run order/timing rather than just this test.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.client_obj, self.secret = PlatformApiClient.generate(name="Acme", scopes=["invoices:read"])
+
+    def tearDown(self):
+        cache.clear()
+
+    def test_throttles_after_configured_rate(self):
+        from django.conf import settings
+
+        limit = int(settings.REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["oauth_token"].split("/")[0])
+        for _ in range(limit):
+            response = self.client.post(
+                "/api/oauth/token/", {"client_id": self.client_obj.client_id, "client_secret": "wrong"}, format="json"
+            )
+            self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        throttled = self.client.post(
+            "/api/oauth/token/", {"client_id": self.client_obj.client_id, "client_secret": self.secret}, format="json"
+        )
+        self.assertEqual(throttled.status_code, status.HTTP_429_TOO_MANY_REQUESTS)

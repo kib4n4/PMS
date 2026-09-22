@@ -8,100 +8,128 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        // Ledger palette — financial, auditable. Neutrals
+        // Ledger palette v2 — retuned from a marketing near-black+accent
+        // combo to the physical objects this product replaces: columnar
+        // ledger paper, thermal receipt ink, a brass date-stamp, a
+        // correction-stamp red. See design plan for the full rationale.
         ink: {
-          50: '#f5f8f7',
-          100: '#e6eee9',
-          200: '#cddfda',
-          300: '#b3c3bf',
-          400: '#97a7a1',
-          500: '#7a8a83',
-          600: '#62726d',
-          700: '#4a5c58',
-          800: '#364745',
-          900: '#132420',
+          // 'ink' — receipt-print near-black, warm-green cast, not pure black.
+          50: '#F4F6F3',
+          100: '#E6EBE4',
+          200: '#CDD6C9',
+          300: '#AFBCA8',
+          400: '#8B9A84',
+          500: '#6B7A64',
+          600: '#525E4C',
+          700: '#3D473A',
+          800: '#272E24',
+          900: '#181A17',
         },
         mist: {
-          50: '#EEF2F0',
-          100: '#e3e7e5',
-          200: '#cad2cf',
-          300: '#b1bbb7',
-          400: '#97a39e',
-          500: '#7a8982',
-          600: '#62726d',
-          700: '#4a5c58',
-          800: '#364745',
-          900: '#223330',
+          // 'paper' — pale sage-tinted ledger stock (Boorum & Pease
+          // columnar-pad green), deliberately cool, never cream.
+          50: '#EAF0E7',
+          100: '#DEE7DA',
+          200: '#C9D6C4',
+          300: '#B0C2A9',
+          400: '#96AC8E',
+          500: '#7C9373',
+          600: '#63795C',
+          700: '#4A5C45',
+          800: '#33402F',
+          900: '#1F2A1C',
         },
         surface: {
-          50: '#ffffff',
-          100: '#fafbfb',
+          // Card/table surfaces — a hair lighter than the page paper.
+          50: '#FEFEFC',
+          100: '#F7FAF5',
         },
         border: {
-          DEFAULT: '#DCE3DF',
-          200: '#c5cdc9',
-          300: '#adb5b0',
+          // 'rule' — the faint printed guideline on ledger paper.
+          DEFAULT: '#D5DFD0',
+          200: '#C3D0BD',
+          300: '#B0C0A9',
         },
 
         // Functional ledger colors
         teal: {
-          50: '#f0fdfb',
-          100: '#ccfbf1',
-          200: '#99f6e4',
-          300: '#5EEAD4',
-          400: '#26b3a7',
-          500: '#0F6B5C',
-          600: '#0d5f4b',
-          700: '#0b513f',
-          800: '#093f30',
-          900: '#072e22',
+          // 'confirmed' — money moved. Deliberately a deep forest green,
+          // shifted away from M-Pesa's own bright grass-green so it
+          // reads as Ledger's color, not a borrowed brand.
+          50: '#EAF5EF',
+          100: '#CDE8D9',
+          200: '#9CD1B5',
+          300: '#66B48D',
+          400: '#39946C',
+          500: '#155E3F',
+          600: '#124F35',
+          700: '#0F412C',
+          800: '#0B3222',
+          900: '#082518',
         },
         amber: {
-          50: '#fffbeb',
-          100: '#fef3c7',
-          200: '#fde68a',
-          300: '#fcd34d',
-          400: '#fbbf24',
-          500: '#C98A2C',
-          600: '#b47d24',
-          700: '#9d681c',
-          800: '#8a5717',
-          900: '#733f0f',
+          // Secondary warm accent — pending/in-progress states.
+          // Harmonized with 'gold' rather than a generic yellow.
+          50: '#FBF4E7',
+          100: '#F3E2BC',
+          200: '#E7C989',
+          300: '#D6AC59',
+          400: '#C1953C',
+          500: '#B3872E',
+          600: '#977224',
+          700: '#7A5C1C',
+          800: '#5E4715',
+          900: '#42320E',
         },
         rust: {
-          50: '#fff1ee',
-          100: '#ffe4dc',
-          200: '#ffbfae',
-          300: '#ff8779',
-          400: '#f85350',
-          500: '#B4472A',
-          600: '#a03e25',
-          700: '#8a341f',
-          800: '#722a19',
-          900: '#5a2013',
+          // 'void' — correction-stamp ink. Brick, not alarm-red.
+          50: '#FBEDE9',
+          100: '#F2CFC5',
+          200: '#E4A797',
+          300: '#D27C66',
+          400: '#B85843',
+          500: '#8C3A2B',
+          600: '#763023',
+          700: '#5F271C',
+          800: '#481D15',
+          900: '#33140F',
         },
         gold: {
-          50: '#fffbeb',
-          100: '#fef9db',
-          200: '#feebc8',
-          300: '#fdd297',
-          400: '#fbc35b',
-          500: '#D9A441',
-          600: '#c3913a',
-          700: '#a87b31',
-          800: '#8a6328',
-          900: '#6d4e1f',
+          // 'stamp' — brass date-stamp / shilling-coin tone. Platform
+          // fees, secondary emphasis.
+          50: '#FBF4E7',
+          100: '#F3E2BC',
+          200: '#E7C989',
+          300: '#D6AC59',
+          400: '#C1953C',
+          500: '#A9791F',
+          600: '#8E661A',
+          700: '#725215',
+          800: '#573F10',
+          900: '#3D2C0B',
         },
       },
 
       fontFamily: {
+        // UI text — Public Sans: the US government's own open-source
+        // type system, built for forms/official documents. On-theme for
+        // a product that files KRA returns and keeps an audit log.
         sans: ['var(--font-sans)', '-apple-system', 'BlinkMacSystemFont', 'system-ui', 'Segoe UI', 'Roboto', 'sans-serif'],
+        // Display/numerals — Fraunces: wide optical-size range, real
+        // oldstyle/tabular figure design. Large KES figures get a
+        // typeface built for numbers, not a sans doing double duty.
+        serif: ['var(--font-display)', 'Georgia', 'Cambria', 'Times New Roman', 'serif'],
         mono: ['var(--font-mono)', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
+      },
+
+      fontSize: {
+        'display-hero': ['3.25rem', { lineHeight: '1.05', letterSpacing: '-0.01em' }],
+        'display-kpi': ['1.875rem', { lineHeight: '1.1', letterSpacing: '-0.005em' }],
       },
 
       // Shared visual primitives
       boxShadow: {
-        ledger: '0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02)',
+        ledger: '0 1px 3px rgba(24, 26, 23, 0.05), 0 1px 2px rgba(24, 26, 23, 0.03)',
       },
     },
   },

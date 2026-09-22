@@ -1,23 +1,33 @@
 # backend/billing/tasks.py
 
 import logging
+from decimal import ROUND_HALF_UP, Decimal
 
 from celery import shared_task
-from django.db import transaction
+from django.conf import settings
+from django.db import IntegrityError, transaction
+from django.db.models import Sum
 from django.utils import timezone
 
+from accounts.phone import normalize_msisdn
 from integrations.daraja import DarajaClient, DarajaError
 from landlords.models import LandlordDarajaCredential
 
 logger = logging.getLogger(__name__)
 
-PLATFORM_FEE_RATE = 0.05  # TODO(Phase 4+): make this configurable per organization/landlord rather than flat.
+TWO_PLACES = Decimal("0.01")
 
-# Window Safaricom C2B confirmations send phone numbers in ("2547XXXXXXXX",
-# no leading +) vs. how this platform stores them (E.164, "+2547XXXXXXXX").
-def _normalize_msisdn(msisdn: str) -> str:
-    msisdn = str(msisdn).strip()
-    return msisdn if msisdn.startswith("+") else f"+{msisdn}"
+
+def _platform_fee_rate() -> Decimal:
+    # Still a single global rate — see settings.PLATFORM_FEE_RATE.
+    # TODO(Phase 4+): make this configurable per organization/landlord rather than flat.
+    return Decimal(str(settings.PLATFORM_FEE_RATE))
+
+
+def _money(value) -> Decimal:
+    """Money must never touch binary float — Decimal all the way from the
+    DB field through to the rounded fee amount."""
+    return Decimal(str(value)).quantize(TWO_PLACES, rounding=ROUND_HALF_UP)
 
 
 def _resolve_invoice(credential, account_reference: str, msisdn: str = ""):
@@ -40,7 +50,7 @@ def _resolve_invoice(credential, account_reference: str, msisdn: str = ""):
 
     if msisdn:
         invoice = (
-            base_qs.filter(lease__tenant__user__phone_number=_normalize_msisdn(msisdn))
+            base_qs.filter(lease__tenant__user__phone_number=normalize_msisdn(msisdn))
             .order_by("due_date")
             .first()
         )
@@ -55,8 +65,15 @@ def _record_payment(*, invoice, credential, amount, transaction_id: str, raw_pay
     Shared by both inbound-payment paths (C2B confirmation and STK Push
     callback): idempotently create the Payment + FeeLedgerEntry, refresh
     the Invoice's status from real payment totals, and queue the receipt
-    email. Idempotency: the DB-level unique constraint on
-    Payment.mpesa_transaction_id is the real safety net.
+    email.
+
+    Idempotency: the DB-level unique constraint on
+    Payment.mpesa_transaction_id is the real safety net against two
+    near-simultaneous deliveries of the same Safaricom callback (which it
+    explicitly retries) both passing the pre-check below before either
+    commits — the `IntegrityError` that constraint raises in that race is
+    caught and treated as "someone else already recorded it," not an
+    error.
     """
     from billing.models import FeeLedgerEntry, Payment
 
@@ -64,30 +81,36 @@ def _record_payment(*, invoice, credential, amount, transaction_id: str, raw_pay
         logger.info("Duplicate payment callback for %s — already recorded, skipping.", transaction_id)
         return None
 
-    with transaction.atomic():
-        payment = Payment.objects.create(
-            invoice=invoice,
-            landlord_credential=credential,
-            amount=amount,
-            mpesa_transaction_id=transaction_id,
-            mpesa_checkout_request_id=checkout_request_id,
-            raw_callback_payload=raw_payload,
-        )
-        platform_fee_amount = round(float(amount) * PLATFORM_FEE_RATE, 2)
+    try:
+        with transaction.atomic():
+            payment = Payment.objects.create(
+                invoice=invoice,
+                landlord_credential=credential,
+                amount=amount,
+                mpesa_transaction_id=transaction_id,
+                mpesa_checkout_request_id=checkout_request_id,
+                raw_callback_payload=raw_payload,
+            )
+            platform_fee_amount = _money(Decimal(str(amount)) * _platform_fee_rate())
 
-        reseller = credential.landlord.referred_by
-        reseller_commission_amount = 0
-        if reseller:
-            rule = reseller.commission_rules.filter(landlord=credential.landlord).first()
-            if rule and (rule.is_perpetual or (rule.expires_at and rule.expires_at > timezone.now())):
-                reseller_commission_amount = round(platform_fee_amount * float(rule.rate_percent) / 100, 2)
+            reseller = credential.landlord.referred_by
+            reseller_commission_amount = Decimal("0")
+            if reseller:
+                rule = reseller.commission_rules.filter(landlord=credential.landlord).first()
+                if rule and (rule.is_perpetual or (rule.expires_at and rule.expires_at > timezone.now())):
+                    reseller_commission_amount = _money(
+                        platform_fee_amount * Decimal(str(rule.rate_percent)) / Decimal("100")
+                    )
 
-        FeeLedgerEntry.objects.create(
-            payment=payment,
-            platform_fee_amount=platform_fee_amount,
-            reseller_commission_amount=reseller_commission_amount,
-            reseller=reseller,
-        )
+            FeeLedgerEntry.objects.create(
+                payment=payment,
+                platform_fee_amount=platform_fee_amount,
+                reseller_commission_amount=reseller_commission_amount,
+                reseller=reseller,
+            )
+    except IntegrityError:
+        logger.info("Payment %s lost a create race — another delivery recorded it first, skipping.", transaction_id)
+        return None
 
     invoice.refresh_status()
     send_payment_receipt_email.delay(str(payment.id))
@@ -160,50 +183,73 @@ def ingest_stk_callback(raw_payload: dict):
         logger.warning("Malformed STK callback payload: %s", raw_payload)
         return
 
-    try:
-        stk_request = STKPushRequest.objects.select_related("invoice", "landlord_credential").get(
-            checkout_request_id=checkout_request_id
-        )
-    except STKPushRequest.DoesNotExist:
-        logger.error("STK callback for unknown CheckoutRequestID %s", checkout_request_id)
-        return
+    # select_for_update + the PENDING re-check inside the same transaction
+    # closes the race two near-simultaneous deliveries of the same
+    # callback would otherwise hit: both reading PENDING before either
+    # writes SUCCESS/FAILED. The second delivery now blocks on the row
+    # lock until the first commits, then sees the already-resolved status.
+    with transaction.atomic():
+        try:
+            stk_request = STKPushRequest.objects.select_for_update().select_related(
+                "invoice", "landlord_credential", "fee_invoice"
+            ).get(checkout_request_id=checkout_request_id)
+        except STKPushRequest.DoesNotExist:
+            logger.error("STK callback for unknown CheckoutRequestID %s", checkout_request_id)
+            return
 
-    if stk_request.status != STKPushRequestStatus.PENDING:
-        logger.info("Duplicate STK callback for %s — already resolved, skipping.", checkout_request_id)
-        return
+        if stk_request.status != STKPushRequestStatus.PENDING:
+            logger.info("Duplicate STK callback for %s — already resolved, skipping.", checkout_request_id)
+            return
 
-    if result_code != 0:
-        stk_request.status = STKPushRequestStatus.FAILED
+        if result_code != 0:
+            stk_request.status = STKPushRequestStatus.FAILED
+            stk_request.result_description = result_desc
+            stk_request.resolved_at = timezone.now()
+            stk_request.save(update_fields=["status", "result_description", "resolved_at"])
+            logger.info("STK push %s failed/cancelled: %s", checkout_request_id, result_desc)
+            return
+
+        items = {
+            item.get("Name"): item.get("Value")
+            for item in (stk_callback.get("CallbackMetadata") or {}).get("Item", [])
+        }
+        transaction_id = items.get("MpesaReceiptNumber")
+        amount = items.get("Amount")
+
+        if not (transaction_id and amount):
+            logger.error("STK callback %s missing MpesaReceiptNumber/Amount: %s", checkout_request_id, raw_payload)
+            return
+
+        if stk_request.fee_invoice_id:
+            success = _record_fee_invoice_payment(stk_request.fee_invoice, transaction_id)
+        else:
+            payment = _record_payment(
+                invoice=stk_request.invoice,
+                credential=stk_request.landlord_credential,
+                amount=amount,
+                transaction_id=transaction_id,
+                raw_payload=raw_payload,
+                checkout_request_id=checkout_request_id,
+            )
+            success = payment is not None
+
+        stk_request.status = STKPushRequestStatus.SUCCESS if success else STKPushRequestStatus.FAILED
         stk_request.result_description = result_desc
         stk_request.resolved_at = timezone.now()
         stk_request.save(update_fields=["status", "result_description", "resolved_at"])
-        logger.info("STK push %s failed/cancelled: %s", checkout_request_id, result_desc)
-        return
 
-    items = {
-        item.get("Name"): item.get("Value")
-        for item in (stk_callback.get("CallbackMetadata") or {}).get("Item", [])
-    }
-    transaction_id = items.get("MpesaReceiptNumber")
-    amount = items.get("Amount")
 
-    if not (transaction_id and amount):
-        logger.error("STK callback %s missing MpesaReceiptNumber/Amount: %s", checkout_request_id, raw_payload)
-        return
-
-    payment = _record_payment(
-        invoice=stk_request.invoice,
-        credential=stk_request.landlord_credential,
-        amount=amount,
-        transaction_id=transaction_id,
-        raw_payload=raw_payload,
-        checkout_request_id=checkout_request_id,
-    )
-
-    stk_request.status = STKPushRequestStatus.SUCCESS if payment else STKPushRequestStatus.FAILED
-    stk_request.result_description = result_desc
-    stk_request.resolved_at = timezone.now()
-    stk_request.save(update_fields=["status", "result_description", "resolved_at"])
+def _record_fee_invoice_payment(fee_invoice, transaction_id: str) -> bool:
+    """Platform-fee side of the STK callback — a landlord paying down
+    their FeeInvoice via the platform's own shortcode. No Payment/
+    FeeLedgerEntry here (those model tenant->landlord rent, not
+    landlord->platform fee); just marks the FeeInvoice paid."""
+    if fee_invoice.mpesa_transaction_id == transaction_id:
+        logger.info("Duplicate fee invoice payment callback for %s — already recorded.", transaction_id)
+        return True
+    fee_invoice.mark_paid(mpesa_transaction_id=transaction_id)
+    logger.info("FeeInvoice %s marked paid via STK push, transaction %s", fee_invoice.id, transaction_id)
+    return True
 
 
 @shared_task
@@ -258,7 +304,14 @@ def send_payment_receipt_email(payment_id: str):
 def generate_fee_invoices(period_start=None, period_end=None):
     """
     Rolls up un-invoiced FeeLedgerEntry rows per landlord into a single
-    FeeInvoice for the period. Scheduled monthly via Celery Beat.
+    FeeInvoice for the period. Scheduled monthly via Celery Beat (see
+    messaging/management/commands/seed_periodic_tasks.py).
+
+    Entries are scoped to payments actually received within
+    [period_start, period_end] — an entry from outside that window stays
+    un-invoiced and gets picked up by whichever future run's window
+    covers it, rather than being invoiced regardless of when the
+    underlying payment landed.
     """
     from billing.models import FeeInvoice, FeeLedgerEntry
     from landlords.models import Landlord
@@ -266,12 +319,25 @@ def generate_fee_invoices(period_start=None, period_end=None):
     period_start = period_start or timezone.now().replace(day=1).date()
     period_end = period_end or timezone.now().date()
 
-    for landlord in Landlord.objects.all():
-        entries = FeeLedgerEntry.objects.filter(
-            payment__landlord_credential__landlord=landlord, invoiced=False
+    landlord_ids = (
+        FeeLedgerEntry.objects.filter(
+            invoiced=False,
+            payment__received_at__date__gte=period_start,
+            payment__received_at__date__lte=period_end,
         )
-        total = sum(e.platform_fee_amount for e in entries)
-        if not entries.exists() or total <= 0:
+        .values_list("payment__landlord_credential__landlord_id", flat=True)
+        .distinct()
+    )
+
+    for landlord in Landlord.objects.filter(id__in=landlord_ids):
+        entries = FeeLedgerEntry.objects.filter(
+            payment__landlord_credential__landlord=landlord,
+            invoiced=False,
+            payment__received_at__date__gte=period_start,
+            payment__received_at__date__lte=period_end,
+        )
+        total = entries.aggregate(total=Sum("platform_fee_amount"))["total"] or Decimal("0")
+        if total <= 0:
             continue
 
         with transaction.atomic():
@@ -339,18 +405,30 @@ def reconcile_all_landlords():
 def log_transaction_status_result(raw_payload: dict):
     """
     Receives the async answer to a query_transaction_status call fired
-    from reconcile_landlord_transactions. A non-zero ResultCode, or a
-    TransactionStatus that doesn't match what we have on file, is the
-    actual "discrepancy" reconciliation exists to catch — surfaced here
-    as a structured error log rather than a full admin-review model,
-    which is more machinery than this needs today.
+    from reconcile_landlord_transactions. A non-zero ResultCode is the
+    actual "discrepancy" reconciliation exists to catch — persisted as an
+    AuditLog entry (reused from the audit app, not a bespoke discrepancy
+    model) so it's queryable/actionable from the admin instead of only
+    ever a log line that scrolls away.
     """
+    from audit.models import AuditLog
+
     result = raw_payload.get("Result", {})
     result_code = result.get("ResultCode")
+
     if result_code == 0:
         logger.info("Transaction status reconciliation OK: %s", result.get("ResultDesc"))
-    else:
-        logger.error("Transaction status reconciliation MISMATCH/FAILURE: %s", result)
+        return
+
+    logger.error("Transaction status reconciliation MISMATCH/FAILURE: %s", result)
+    AuditLog.objects.create(
+        actor=None,
+        action="reconciliation_mismatch",
+        target_object_type="Payment",
+        target_object_id=str(result.get("TransactionID", "unknown")),
+        reason=result.get("ResultDesc", "Transaction status query returned a non-zero ResultCode."),
+        metadata={"result_code": result_code, "raw_result": result},
+    )
 
 
 @shared_task

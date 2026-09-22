@@ -1,97 +1,38 @@
-# PMS — M0/M1 Implementation
+# Dime PMS
 
-This is a working scaffold, not a demo: the Django project runs, migrations
-apply, the ORM object chain (Organization → Landlord → Property → Unit →
-Lease → Tenant, plus Reseller/Investor/Caretaker) has been created and
-verified, and the C2B ingestion → fee ledger → fee invoice pipeline has
-been smoke-tested for idempotency and correct fee math. What's stubbed is
-exactly the external API calls that need real credentials — Daraja and
-WhatsApp — and nothing else.
+A multi-tenant property management system for the Kenyan market: M-Pesa
+rent collection (Daraja), platform fee billing, reseller/investor payouts,
+WhatsApp tenant communication, maintenance ticketing, and KRA rental-income
+filing. Backend is Django/DRF with a django-unfold admin theme, RBAC, a
+JWT + OAuth2-client-credentials auth split, and a publicly-documented
+OpenAPI schema; frontend is a Next.js app with all five role dashboards
+wired to real backend data.
 
-## What's implemented (M0 + M1)
+Full architecture and data model: **`CODEBASE_EXPLAINED.md`**.
+Full endpoint reference: **`pms-endpoints.md`**.
 
-- **10 Django apps**, one per core module: `accounts`, `landlords`,
-  `properties`, `leasing`, `billing`, `partners`, `caretakers`,
-  `maintenance`, `messaging`, `audit`.
-- **Every model from the design doc**, with UUID primary keys and the
-  correct FK relationships — including the circular reference between
-  `Landlord.referred_by` (partners.Reseller) and `Reseller`'s referred
-  landlords, which Django's migration dependency resolver handles as two
-  migration files per app automatically.
-- **Django admin registered for every model** — staff can create the full
-  chain manually today, which is the actual M1 sign-off condition, not
-  just a schema on paper.
-- **Two Celery pipelines**, matching the design doc's split:
-  - `billing/tasks.py` — `ingest_c2b_confirmation` (idempotent, dedupes on
-    `mpesa_transaction_id`), `generate_fee_invoices`,
-    `reconcile_landlord_transactions` / `reconcile_all_landlords`.
-  - `partners/tasks.py` — `sweep_reseller_payouts`, `sweep_investor_payouts`,
-    funded from platform fee revenue, not tenant rent.
-- **Stubbed integration clients** (`integrations/daraja.py`,
-  `integrations/whatsapp.py`) — every method that would make a real HTTP
-  call raises `NotImplementedError` with a clear `TODO(M2)` /
-  `TODO(M3)` marker, rather than silently no-op-ing. This sandbox has no
-  network path to Safaricom or Meta's APIs and no real credentials exist
-  yet, so this is the correct boundary for now.
-- **Public webhook routes** on a separate URL group (`/webhooks/...`) so
-  host Nginx can apply a stricter/separate rate limit, per the design doc.
-  All four Daraja callback types are routed (C2B validation, C2B
-  confirmation, B2C result, B2C timeout) even though B2C handling is
-  still a TODO for M4.
-- **Health check endpoint** (`/healthz/`) for the Docker healthcheck.
-- **Docker Compose** wiring backend, Celery worker, Celery beat, Postgres,
-  and Redis, matching the host-Nginx-terminates-TLS pattern from the
-  design doc. Frontend service is commented out until it's more than a
-  scaffold.
-- **Next.js frontend scaffold** — routing structure documented in
-  `frontend/app/page.tsx`, not built out. Dashboards are M5 work.
+## Status
 
-## What was verified, not just written
+Every backend app has real, tested logic behind it — not stubs. What
+remains is mostly operational (real credentials, a few Phase 4+ business
+rules), not architectural. See `CODEBASE_EXPLAINED.md#status` for the
+precise breakdown; in short:
 
-Run from `backend/` with the venv active:
+- **Blocked on external dependencies**: real Daraja/WhatsApp credentials,
+  a Meta-approved WhatsApp OTP template, the manual per-landlord
+  Safaricom-portal C2B URL registration step.
+- **Deliberately deferred (Phase 4+)**: per-landlord fee rates, investor
+  revenue-share amount computation, platform B2C float-balance checks.
+- **Done**: the Next.js frontend is wired to the real JSON endpoints across
+  all five role dashboards; no mock data remains.
 
+Verify locally (from `backend/`, with the venv active):
 ```bash
-python manage.py makemigrations   # generates cleanly, no model errors
-python manage.py migrate          # applies cleanly against sqlite/postgres
-python manage.py check            # 0 issues
+python manage.py makemigrations --check   # no pending model changes
+python manage.py migrate                  # applies cleanly against sqlite/postgres
+python manage.py check                    # 0 issues
+python manage.py test                     # full suite
 ```
-
-The ORM chain and money-flow logic were smoke-tested directly (see
-commands reproduced below) and confirmed:
-- Full object chain creates correctly, including `referred_by` and
-  `CaretakerAssignment`.
-- Replaying the same C2B callback payload does **not** create a duplicate
-  `Payment` (idempotency via the `mpesa_transaction_id` unique constraint).
-- Platform fee calculates correctly (5% of rent collected).
-- Reseller commission calculates correctly (10% of the **platform fee**,
-  not the tenant's rent — this was a specific design requirement).
-- `generate_fee_invoices` rolls up the ledger entries into a correct
-  `FeeInvoice` total.
-- The webhook → Celery task wiring round-trips through Django's test
-  client and correctly rejects an unrecognized shortcode.
-
-## What's genuinely next (M2)
-
-This is where "implement it" runs into a real external dependency, not a
-scope-cutting choice:
-
-1. **Real Daraja credentials.** Sandbox Consumer Key/Secret and initiator
-   credentials for at least one test landlord shortcode, plus the
-   platform's own Daraja app for fee collection and B2C payouts.
-2. **A secrets manager.** `LandlordDarajaCredential` stores secret
-   *references*, not raw secrets, by design — Vault or a cloud secrets
-   manager needs to exist before real credentials are entered anywhere.
-3. **Real WhatsApp Cloud API access** — a Meta app, phone number ID, and
-   access token — before `integrations/whatsapp.py` can be un-stubbed.
-4. **The manual Safaricom-portal step** — registering each landlord's C2B
-   validation/confirmation URLs against their shortcode — has to happen
-   per landlord and can't be automated from this codebase; it's tracked
-   as `LandlordDarajaCredential.c2b_urls_registered` so the admin console
-   can surface it as an onboarding checklist item.
-
-Once those exist, the `TODO(M2)` markers in `integrations/daraja.py` and
-`billing/tasks.py` are the exact, complete list of what to wire — the
-data model and pipeline structure around them don't need to change.
 
 ## Running locally
 
@@ -104,23 +45,35 @@ Backend will be reachable inside the Docker network on `backend:8000`
 (host Nginx, not part of this compose file, handles public TLS
 termination and proxying per the design doc).
 
-## OAuth 2.0 (Authorization server + Resource server)
+## One-time setup per environment (after `migrate`)
 
-This project includes a django-oauth-toolkit (DOT) based OAuth 2.0 provider for third-party API access.
+These are deliberate manual steps, not part of `migrate` — each is an
+operational decision (who gets what permissions, when things run), not a
+schema change:
 
-Quick notes:
-- Authorization endpoints are mounted at /o/ (DOT's URLs). Use the Authorization Code + PKCE flow for delegated access and Client Credentials for M2M integrations.
-- Install dependencies: pip install -r backend/requirements.txt (DOT and CORS are included).
-- Settings: OAUTH2_PROVIDER is configured in ackend/config/settings.py. Session-authenticated users continue to work; OAuth tokens require ead for GET and write for mutating requests.
-- Client registration: staff can create confidential Applications in Django admin (oauth2_provider.Application) or logged-in users can manage their own apps at /o/applications/.
+```bash
+# Grants role=admin staff their baseline Django-admin permissions (view/add/
+# change on operational models, no delete on financial records, zero access
+# to secret-bearing models — see accounts/management/commands/sync_role_permissions.py).
+# Safe to re-run any time; fully replaces the group's permission set each time.
+docker compose exec backend python manage.py sync_role_permissions
 
-DB-driven credentials for Daraja/WhatsApp
+# Seeds django-celery-beat schedules for fee invoicing, nightly reconciliation,
+# reseller/investor payout sweeps, and rent reminders — none of these run on
+# any schedule until this has been run once. Idempotent.
+docker compose exec backend python manage.py seed_periodic_tasks
 
-- Per-landlord Daraja credentials are stored in LandlordDarajaCredential (secret refs, not raw values). The integration client (integrations/daraja.py) must resolve secrets via a secrets manager before making real HTTP calls.
-- Per-landlord WhatsApp credential references are stored in LandlordWhatsAppCredential (new model). integrations/whatsapp.py provides a or_landlord constructor; implement secret resolution against your secrets manager in production.
+# Issues an external-integrator API client (OAuth2 client-credentials grant,
+# POST /api/oauth/token/) — the secret is shown once, at creation.
+docker compose exec backend python manage.py create_api_client --name "Acme Accounting" --scopes invoices:read
 
-Docker / Production readiness
+# Rotates an existing client's secret (e.g. after a suspected leak) without
+# touching its scopes/landlord binding — new secret is shown once.
+docker compose exec backend python manage.py rotate_api_client_secret --client-id pms_xxxxxxxx
+```
 
-- docker-compose.yml defines postgres, redis, backend, worker, and beat services. Host Nginx should terminate TLS and proxy into the backend container (the backend does not publish host ports by default).
-- Use a secrets manager in production; environment variables in .env must reference secret paths only where appropriate.
-
+The Unfold-themed admin is at `/admin/`; a Dime staff user needs
+`role=admin` (grants `is_staff` automatically — see
+`accounts/signals.py`) or `is_superuser` to log in. API documentation
+(Swagger UI) is public, no login required, at `/api/docs/`
+(`/api/redoc/` and `/api/schema/` too).

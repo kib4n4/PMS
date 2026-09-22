@@ -6,15 +6,17 @@ from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema, inline_serializer
-from rest_framework import permissions, serializers, status
+from rest_framework import permissions, serializers, status, viewsets
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import Role
+from accounts.rbac import resolve_actor_scope
 from integrations.daraja import DarajaError
 
-from .models import Invoice, Payment
+from .models import FeeInvoice, FeeLedgerEntry, Invoice, Payment
 from .pdf import render_invoice_pdf, render_receipt_pdf
+from .serializers import FeeInvoiceSerializer, FeeLedgerEntrySerializer, InvoiceSerializer, PaymentSerializer
 from .services import (
     InvoiceAlreadyPaidError,
     LandlordNotReadyError,
@@ -131,3 +133,89 @@ class InvoiceInitiatePaymentView(APIView):
             },
             status=status.HTTP_202_ACCEPTED,
         )
+
+
+class InvoiceViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    GET /api/billing/invoices/ , /api/billing/invoices/{id}/ — JSON list/
+    detail (distinct from InvoicePDFView's binary PDF download above).
+    Admin/superuser sees all; a landlord sees their properties' invoices;
+    a tenant sees only their own.
+    """
+
+    serializer_class = InvoiceSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        scope = resolve_actor_scope(self.request.user)
+        qs = Invoice.objects.select_related("lease__unit__property__landlord", "lease__tenant").order_by(
+            "-created_at"
+        )
+        if scope.is_admin:
+            return qs
+        if scope.landlord_id:
+            return qs.filter(lease__unit__property__landlord_id=scope.landlord_id)
+        if scope.tenant_id:
+            return qs.filter(lease__tenant_id=scope.tenant_id)
+        return qs.none()
+
+
+class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
+    """GET /api/billing/payments/ , /api/billing/payments/{id}/ — same
+    scoping rule as InvoiceViewSet, via the payment's invoice."""
+
+    serializer_class = PaymentSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        scope = resolve_actor_scope(self.request.user)
+        qs = Payment.objects.select_related(
+            "invoice__lease__unit__property__landlord", "invoice__lease__tenant"
+        ).order_by("-received_at")
+        if scope.is_admin:
+            return qs
+        if scope.landlord_id:
+            return qs.filter(invoice__lease__unit__property__landlord_id=scope.landlord_id)
+        if scope.tenant_id:
+            return qs.filter(invoice__lease__tenant_id=scope.tenant_id)
+        return qs.none()
+
+
+class FeeInvoiceViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    GET /api/billing/fee-invoices/ , /api/billing/fee-invoices/{id}/ —
+    what a landlord owes the platform. Tenants have no reason to see
+    these at all, so unlike Invoice/Payment there is no tenant branch.
+    """
+
+    serializer_class = FeeInvoiceSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        scope = resolve_actor_scope(self.request.user)
+        qs = FeeInvoice.objects.select_related("landlord").order_by("-created_at")
+        if scope.is_admin:
+            return qs
+        if scope.landlord_id:
+            return qs.filter(landlord_id=scope.landlord_id)
+        return qs.none()
+
+
+class FeeLedgerEntryViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    GET /api/billing/fee-ledger-entries/ , /{id}/ — the per-payment
+    platform-fee records a FeeInvoice eventually rolls up. Feeds the
+    landlord dashboard's "Revenue vs Platform Fees" chart's fee side.
+    """
+
+    serializer_class = FeeLedgerEntrySerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        scope = resolve_actor_scope(self.request.user)
+        qs = FeeLedgerEntry.objects.select_related("payment").order_by("-created_at")
+        if scope.is_admin:
+            return qs
+        if scope.landlord_id:
+            return qs.filter(payment__landlord_credential__landlord_id=scope.landlord_id)
+        return qs.none()

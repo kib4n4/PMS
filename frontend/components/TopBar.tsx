@@ -3,6 +3,7 @@
 import { usePathname } from "next/navigation";
 
 import { useAuth } from "@/lib/auth-context";
+import { ShieldIcon } from "@/components/Icons";
 
 const SECTION_LABELS: Record<string, string> = {
   "/": "Overview",
@@ -29,15 +30,15 @@ export default function TopBar() {
 
   return (
     <div className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-surface px-6 lg:px-8">
-      <nav className="flex items-center gap-1.5 text-sm" aria-label="Breadcrumb">
+      <nav className="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
         <span className="text-ink-500">Dashboards</span>
         <span className="text-ink-300">/</span>
-        <span className="font-medium text-ink-800">{section}</span>
+        <span className="font-serif text-[15px] font-medium text-ink-800">{section}</span>
       </nav>
 
       {isSuperAdmin && (
-        <span className="inline-flex items-center gap-1.5 rounded-full border border-teal-200 bg-teal-50 px-2.5 py-1 text-xs font-medium text-teal-700">
-          <span className="h-1.5 w-1.5 rounded-full bg-teal-500" />
+        <span className="inline-flex items-center gap-1.5 rounded-sm border border-teal-200 bg-teal-50 px-2.5 py-1 text-xs font-medium text-teal-700">
+          <ShieldIcon className="h-3.5 w-3.5" />
           {viewingOtherRole ? `Super Admin — viewing ${section}` : "Super Admin"}
         </span>
       )}

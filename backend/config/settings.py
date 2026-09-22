@@ -45,9 +45,12 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://api.yourdomain.com"
 # Application definition
 
 INSTALLED_APPS = [
-    'config',
+    # Admin theme — must be listed before django.contrib.admin so it can
+    # override the built-in admin's templates. Plain/default Unfold config
+    # only (see UNFOLD below); no custom admin JS pages in this backend.
     'unfold',
-    'oauth2_provider',
+    'unfold.contrib.filters',
+    'unfold.contrib.forms',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -74,40 +77,26 @@ INSTALLED_APPS = [
     'taxes',
     'api_auth',
     'audit',
-    'integrations',
 ]
 
 AUTH_USER_MODEL = 'accounts.User'
-OAUTH2_PROVIDER = {
-    'CLIENT_ID_GENERATOR': 'oauth2_provider.generators.ClientIdGenerator',
-    'CLIENT_SECRET_GENERATOR': 'oauth2_provider.generators.ClientSecretGenerator',
-    'ACCESS_TOKEN_EXPIRE_SECONDS': 3600, # 1 hour
-    'REFRESH_TOKEN_EXPIRE_SECONDS': 2592000,  # 30 days
-    'ROTATE_REFRESH_TOKEN': True,
-    'PKCE_REQUIRED': True,
-    'PKCE_METHODS': ['plain', 'S256'],
-    'OAUTH2_VALIDATOR_CLASS': 'accounts.oauth.PMSOAuth2Validator',
-    'SCOPES': {
-        'read': 'Read access to resources',
-        'write': 'Write access to resources',
-        'tenants': 'Manage tenants and leases',
-        'properties': 'Read/manage properties and units',
-        'billing': ' Read/manage payments and invoices',
-    },
-}
 
 REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'oauth2_provider.contrib.rest_framework.OAuth2Authentication',
         'rest_framework_simplejwt.authentication.JWTAuthentication',
         # Session auth stays enabled only for the browsable API / Django
         # admin — not used by the frontend or external clients.
         'rest_framework.authentication.SessionAuthentication',
     ],
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # 'oauth_token' scope used by api_auth.api_views.TokenEndpointThrottle —
+    # a credential-exchange endpoint with no other rate limit in front of it.
+    'DEFAULT_THROTTLE_RATES': {
+        'oauth_token': '10/min',
+    },
 }
 
 SPECTACULAR_SETTINGS = {
@@ -115,13 +104,29 @@ SPECTACULAR_SETTINGS = {
     'DESCRIPTION': (
         'Property management, payments, messaging, and tax-filing API for the Dime PMS platform. '
         'Internal endpoints under /api/ use JWT (user login); external-integrator endpoints under '
-        '/api/external/ use the OAuth2 client-credentials grant issued by POST /api/oauth/token/.'
+        '/api/external/ use the OAuth2 client-credentials grant issued by POST /api/oauth/token/ '
+        '(rate-limited; scopes are drawn from a fixed registry — see api_auth.models.Scope). '
+        'This documentation (/api/docs/, /api/redoc/, /api/schema/) is publicly readable without '
+        'authentication; the endpoints it describes are not.'
     ),
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
+    # Docs are intentionally public — see SPECTACULAR_SETTINGS['DESCRIPTION']
+    # above. This overrides the global IsAuthenticated default (REST_FRAMEWORK)
+    # for the schema/Swagger/Redoc views only.
+    'SERVE_PERMISSIONS': ['rest_framework.permissions.AllowAny'],
     # Webhooks (billing/messaging) are plain Django views, not DRF, so
     # they never appear here regardless of this setting — they speak
     # Safaricom/Meta's payload formats, not this platform's public API.
+    # Several unrelated models all name their status field "status" —
+    # without this, drf-spectacular can't always give each one's enum a
+    # distinct, readable schema component name.
+    'ENUM_NAME_OVERRIDES': {
+        'InvoiceStatusEnum': 'billing.models.InvoiceStatus',
+        'FeeInvoiceStatusEnum': 'billing.models.FeeInvoiceStatus',
+        'STKPushRequestStatusEnum': 'billing.models.STKPushRequestStatus',
+        'DisbursementStatusEnum': 'partners.models.DisbursementStatus',
+    },
 }
 
 SIMPLE_JWT = {
@@ -156,6 +161,12 @@ CORS_ALLOW_CREDENTIALS = False
 # credentials/fields.py the first time it's used.
 CREDENTIAL_ENCRYPTION_KEY = os.environ.get("CREDENTIAL_ENCRYPTION_KEY", "")
 
+# --- Billing --------------------------------------------------------------
+# Flat platform fee taken from every confirmed rent payment. Still a single
+# global rate (per-landlord rates are a documented Phase 4+ TODO in
+# billing/tasks.py) — env-overridable so it's no longer a literal in code.
+PLATFORM_FEE_RATE = os.environ.get("PLATFORM_FEE_RATE", "0.05")
+
 # Celery — broker/result backend point at Redis (see docker-compose.yml).
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
@@ -176,6 +187,10 @@ if 'test' in sys.argv:
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # Serves collected static files (incl. django-unfold's assets) directly
+    # from gunicorn — there's no nginx/static-file layer in front of this
+    # backend anywhere in the repo today.
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -264,117 +279,101 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
-
-# Serve additional static files during development; include the project-level static dir
-STATICFILES_DIRS = [BASE_DIR / 'static']
-
-CORS_ALLOWED_ORIGINS = ["http://localhost:3000"]
-
-LOGIN_URL = '/accounts/login/'
-
-
-# --- Field-level encryption for DB-stored provider credentials -----------
-# ProviderCredential (integrations app) stores Twilio/Resend/Daraja secrets
-# in the database rather than in code, encrypted at rest with Fernet.
-# Generate a real key with:
-#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-# and set it as FIELD_ENCRYPTION_KEY in the environment — never commit a
-# real key. The fallback below is dev-only and must not reach production.
-FIELD_ENCRYPTION_KEY = os.environ.get(
-    "FIELD_ENCRYPTION_KEY", "cRvE7t9m1zQ5cW3s7d0jLK8kzT2yF4xP6nB1hU9wRfA="
-)
-
-# --- Resend (transactional email) — used to deliver OTP login codes ------
-# Platform-level: OTP is a platform identity concern, not per-landlord, so
-# this stays a plain env var rather than a DB-stored ProviderCredential.
-RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
-RESEND_OTP_FROM_EMAIL = os.environ.get("RESEND_OTP_FROM_EMAIL", "otp@dimeconsultants.africa")
-
-# --- Twilio (WhatsApp) ----------------------------------------------------
-# Platform-level fallback account, used when a landlord has not yet
-# onboarded their own Twilio WhatsApp sender (see integrations.models.
-# ProviderCredential and integrations.whatsapp.WhatsAppClient.for_landlord).
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
-TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM", "")  # e.g. "whatsapp:+14155238886"
-
-# Static files collection (for production)
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-# Unfold admin theme configuration. Replace the default Django admin with the
-# modern Unfold theme and a custom 'properties' palette that stays mostly blue.
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
+
+
+# --- Admin UI (django-unfold) ---------------------------------------------
+# Grouped navigation, an emerald brand palette (reads as growth/money/trust
+# for a rent-and-fees platform — a deliberate swap for Unfold's stock
+# generic purple), no custom dashboard callback, no bespoke widgets. This
+# is the only admin surface in the backend; there are no separate
+# custom-built JS admin pages anywhere here.
 UNFOLD = {
-    "SITE_TITLE": "PMS Properties",
-    "SITE_HEADER": "PMS Admin",
-    "SITE_SUBHEADER": "Properties, Landlords & Integrations",
-    "SITE_ICON": None,
-    "SITE_LOGO": None,
-    "SHOW_HISTORY": True,
-    "SHOW_VIEW_ON_SITE": False,
-    "SHOW_LANGUAGES": False,
-    "SHOW_BACK_BUTTON": False,
+    "SITE_TITLE": "Dime PMS",
+    "SITE_HEADER": "Dime PMS",
+    "SITE_SYMBOL": "real_estate_agent",
     "COLORS": {
-        "base": {
-            "50": "#f8fbff",
-            "100": "#eef6ff",
-            "200": "#dfeeff",
-            "300": "#cfe5ff",
-            "400": "#b6d4ff",
-            "500": "#8db7ff",
-            "600": "#5a8df7",
-            "700": "#3d76ea",
-            "800": "#2d5ecb",
-            "900": "#1d4fa3",
-            "950": "#153a75",
-        },
+        # Tailwind's official "emerald" scale (oklch) — swapped in for
+        # Unfold's default violet primary. base/font stay Unfold's own
+        # neutral greys; only the brand color changes.
         "primary": {
-            "50": "#edf6ff",
-            "100": "#d9ebff",
-            "200": "#b7d9ff",
-            "300": "#8dbdff",
-            "400": "#5f9fff",
-            "500": "#3d7ef7",
-            "600": "#2d68d5",
-            "700": "#214eb4",
-            "800": "#1d3d8a",
-            "900": "#16336f",
-            "950": "#0d224d",
+            "50": "oklch(97.9% 0.021 166.113)",
+            "100": "oklch(95% 0.052 163.051)",
+            "200": "oklch(90.5% 0.093 164.15)",
+            "300": "oklch(84.5% 0.143 164.978)",
+            "400": "oklch(76.5% 0.177 163.223)",
+            "500": "oklch(69.6% 0.17 162.48)",
+            "600": "oklch(59.6% 0.145 163.225)",
+            "700": "oklch(50.8% 0.118 165.612)",
+            "800": "oklch(43.2% 0.095 166.913)",
+            "900": "oklch(37.8% 0.077 168.94)",
+            "950": "oklch(26.2% 0.051 172.552)",
         },
     },
-    "THEME": os.environ.get("DEFAULT_ADMIN_THEME", "theme-1"),
-    "STYLES": [
-        "/static/css/admin-properties.css",
-    ],
-    "SCRIPTS": [
-        "/static/js/admin-theme.js",
-    ],
+    "SHOW_HISTORY": True,
+    "SHOW_VIEW_ON_SITE": False,
     "SIDEBAR": {
         "show_search": True,
         "show_all_applications": False,
-        "navigation": [],
+        "navigation": [
+            {
+                "title": "Operations",
+                "items": [
+                    {"title": "Organizations", "icon": "corporate_fare", "link": "/admin/landlords/organization/"},
+                    {"title": "Landlords", "icon": "badge", "link": "/admin/landlords/landlord/"},
+                    {"title": "Daraja credentials", "icon": "key", "link": "/admin/landlords/landlorddarajacredential/"},
+                    {"title": "Properties", "icon": "apartment", "link": "/admin/properties/property/"},
+                    {"title": "Units", "icon": "door_front", "link": "/admin/properties/unit/"},
+                    {"title": "Tenants", "icon": "person", "link": "/admin/leasing/tenant/"},
+                    {"title": "Leases", "icon": "description", "link": "/admin/leasing/lease/"},
+                    {"title": "Caretakers", "icon": "engineering", "link": "/admin/caretakers/caretaker/"},
+                    {"title": "Maintenance tickets", "icon": "build", "link": "/admin/maintenance/maintenanceticket/"},
+                ],
+            },
+            {
+                "title": "Money",
+                "items": [
+                    {"title": "Invoices", "icon": "receipt_long", "link": "/admin/billing/invoice/"},
+                    {"title": "Payments", "icon": "payments", "link": "/admin/billing/payment/"},
+                    {"title": "Fee ledger", "icon": "account_balance", "link": "/admin/billing/feeledgerentry/"},
+                    {"title": "Fee invoices", "icon": "request_quote", "link": "/admin/billing/feeinvoice/"},
+                    {"title": "Resellers", "icon": "groups", "link": "/admin/partners/reseller/"},
+                    {"title": "Investors", "icon": "trending_up", "link": "/admin/partners/investor/"},
+                    {"title": "Disbursements", "icon": "outbound", "link": "/admin/partners/disbursement/"},
+                    {"title": "Tax filings", "icon": "fact_check", "link": "/admin/taxes/rentalincomereturn/"},
+                ],
+            },
+            {
+                "title": "Messaging",
+                "items": [
+                    {"title": "Templates", "icon": "quickreply", "link": "/admin/messaging/notificationtemplate/"},
+                    {"title": "WhatsApp messages", "icon": "forum", "link": "/admin/messaging/whatsappmessage/"},
+                    {"title": "Email messages", "icon": "mail", "link": "/admin/messaging/emailmessage/"},
+                ],
+            },
+            {
+                "title": "Platform",
+                "items": [
+                    {"title": "Users", "icon": "manage_accounts", "link": "/admin/accounts/user/"},
+                    {"title": "Platform credentials", "icon": "vpn_key", "link": "/admin/credentials/platformcredential/"},
+                    {"title": "API clients", "icon": "api", "link": "/admin/api_auth/platformapiclient/"},
+                    {"title": "Audit log", "icon": "history", "link": "/admin/audit/auditlog/"},
+                    {
+                        "title": "API docs (public)",
+                        "icon": "menu_book",
+                        "link": "/api/docs/",
+                    },
+                ],
+            },
+        ],
     },
 }
-
-# Back-compat default theme names for legacy admin JS if needed.
-DEFAULT_ADMIN_THEME = os.environ.get("DEFAULT_ADMIN_THEME", "theme-1")
-ADMIN_THEME_CHOICES = [
-    ("theme-1", "Blue (Default)"),
-    ("theme-2", "Cyan"),
-    ("theme-3", "Indigo"),
-    ("theme-4", "Teal"),
-    ("theme-5", "Purple"),
-    ("theme-6", "Green"),
-    ("theme-7", "Slate"),
-]
-
-# Provider -> recommended auth type mapping (used by admin JS & server-side tooling)
-PROVIDER_AUTH_MAPPING = {
-    'twilio': 'oauth2',
-    'daraja': 'oauth2',
-    'resend': 'bearer',
-}
-
-# Ensure CORS allowed origins include the local dev host for frontend if present
-_cors_extra = os.environ.get("EXTRA_CORS_ALLOWED_ORIGINS", "")
-if _cors_extra:
-    CORS_ALLOWED_ORIGINS = list(set(CORS_ALLOWED_ORIGINS + _cors_extra.split(",")))

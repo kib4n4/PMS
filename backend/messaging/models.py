@@ -43,6 +43,14 @@ class MessageDirection(models.TextChoices):
     OUTBOUND = "outbound", "Outbound"
 
 
+class WhatsAppDeliveryStatus(models.TextChoices):
+    QUEUED = "queued", "Queued"
+    SENT = "sent", "Sent"
+    DELIVERED = "delivered", "Delivered"
+    READ = "read", "Read"
+    FAILED = "failed", "Failed"
+
+
 class WhatsAppMessage(models.Model):
     """Inbound/outbound log — the audit + debugging trail for every
     WhatsApp interaction, linked to whichever entity triggered it."""
@@ -54,7 +62,13 @@ class WhatsAppMessage(models.Model):
         NotificationTemplate, on_delete=models.SET_NULL, null=True, blank=True, related_name="messages"
     )
     body = models.TextField()
-    delivery_status = models.CharField(max_length=30, blank=True)
+    delivery_status = models.CharField(
+        max_length=30, choices=WhatsAppDeliveryStatus.choices, default=WhatsAppDeliveryStatus.QUEUED, blank=True
+    )
+    meta_message_id = models.CharField(
+        max_length=100, blank=True, db_index=True,
+        help_text="Meta's id for an OUTBOUND send — correlates Meta's delivery-status webhook back to this row.",
+    )
     related_object_type = models.CharField(
         max_length=100, blank=True, help_text="e.g. 'Invoice', 'MaintenanceTicket'"
     )

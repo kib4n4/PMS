@@ -11,23 +11,16 @@
 2. [Backend Architecture](#backend-architecture)
    - [Django Apps](#django-apps)
    - [Data Model](#data-model)
+   - [Auth & RBAC](#auth--rbac)
+   - [Admin UI](#admin-ui)
    - [API Layer](#api-layer)
    - [Celery Pipelines](#celery-pipelines)
    - [Webhooks](#webhooks)
    - [Integrations](#integrations)
 3. [Frontend Architecture](#frontend-architecture)
-   - [Tech Stack](#tech-stack)
-   - [Routing](#routing)
-   - [Components](#components)
-   - [Dashboard Pages](#dashboard-pages)
 4. [Core Flows](#core-flows)
-   - [Rent Collection Flow](#rent-collection-flow)
-   - [Fee & Commission Flow](#fee--commission-flow)
-   - [Payout Flow](#payout-flow)
-   - [Maintenance Flow](#maintenance-flow)
-   - [Messaging Flow](#messaging-flow)
 5. [How to Run Locally](#how-to-run-locally)
-6. [Milestone Status](#milestone-status)
+6. [Status](#status)
 7. [Glossary](#glossary)
 
 ---
@@ -39,15 +32,19 @@ market. It connects landlords, tenants, resellers, investors, caretakers, and
 Dime staff (admin) in a single platform that orchestrates:
 
 - Property and lease management
-- M-Pesa rent collection via Safaricom Daraja
-- Platform fee billing and commission payouts
-- WhatsApp-based tenant communication
-- Maintenance ticketing
-- Full audit trail for every financial action
+- M-Pesa rent collection via Safaricom Daraja (each landlord's own shortcode)
+- Platform fee billing (landlord → platform) and commission payouts
+  (platform → reseller/investor)
+- WhatsApp-based tenant communication, including proactive rent reminders
+- Maintenance ticketing, with WhatsApp notifications on assignment and resolution
+- KRA Monthly Rental Income tax filing
+- An external, scoped OAuth2 API for third-party integrators
+- Full audit trail for manual admin overrides and reconciliation discrepancies
 
-The system is designed around **Option B** from the design doc: each landlord
-keeps their own M-Pesa Paybill/Till. The platform observes payments via shared
-webhooks and bills the landlord a platform fee separately.
+The system is built around **Option B** from the original design doc: each
+landlord keeps their own M-Pesa Paybill/Till. The platform observes payments
+via shared webhooks and separately bills the landlord a platform fee — it
+never holds tenant funds.
 
 ---
 
@@ -57,16 +54,19 @@ webhooks and bills the landlord a platform fee separately.
 
 | App | Purpose |
 |-----|---------|
-| `accounts` | Custom User model with roles (admin, landlord, tenant, reseller, investor, caretaker), OTP requests |
+| `accounts` | Custom User model with roles, phone-first OTP login, role→Group RBAC sync |
 | `landlords` | Organization, Landlord profile, Daraja credentials, onboarding status |
 | `properties` | Property and Unit models with status tracking |
-| `leasing` | Tenant, Lease, tenant onboarding/offboarding serializers and viewsets |
-| `billing` | Invoice, Payment, FeeLedgerEntry, FeeInvoice, C2B webhook views, Celery tasks |
-| `partners` | Reseller, Investor, PayoutAccount, ReferralCommissionRule, RevenueShareAgreement, Disbursement |
+| `leasing` | Tenant, Lease, landlord-facing tenant onboarding/offboarding API |
+| `billing` | Invoice, Payment, FeeLedgerEntry, FeeInvoice, STK Push/C2B/B2C webhooks, Celery tasks, JSON API |
+| `partners` | Reseller, Investor, PayoutAccount, ReferralCommissionRule, RevenueShareAgreement, Disbursement, dashboard API |
 | `caretakers` | Caretaker profile and effective-dated property assignments |
-| `maintenance` | MaintenanceTicket model linked to units and tenants |
-| `messaging` | NotificationTemplate, WhatsAppMessage, webhook views, Celery tasks |
-| `audit` | AuditLog for manual admin overrides |
+| `maintenance` | MaintenanceTicket, with signals for assignment/resolution notifications |
+| `messaging` | NotificationTemplate, WhatsAppMessage, EmailMessage, inbound webhook, intent routing, proactive reminders |
+| `taxes` | LandlordKRACredential, RentalIncomeReturn (Monthly Rental Income filing) |
+| `credentials` | Encrypted-at-rest platform-level secrets (Daraja, WhatsApp, Resend), DB-driven |
+| `api_auth` | External-integrator OAuth2 client-credentials grant (`PlatformApiClient`) |
+| `audit` | AuditLog — manual admin overrides and reconciliation mismatches |
 
 ### Data Model
 
@@ -77,107 +77,176 @@ Organization
       │    └── Unit (status: vacant/occupied/maintenance)
       │         └── Lease (status: application/active/renewal_pending/terminated)
       │              └── Tenant (user, full_name)
-      ├── LandlordDarajaCredential (shortcode, environment, status)
-      └── FeeInvoice (period, total, status)
+      │                   └── MaintenanceTicket (status, resolved_at)
+      ├── LandlordDarajaCredential (shortcode, environment, status — encrypted secrets)
+      ├── LandlordKRACredential (kra_pin, environment, status — encrypted secrets)
+      └── FeeInvoice (reference, period, total, status)
 
 Reseller (user, payout_account)
- └── ReferralCommissionRule (landlord, rate_percent, is_perpetual)
+ └── ReferralCommissionRule (landlord, rate_percent, is_perpetual)  — clean() rejects
+     a second overlapping active rule for the same (reseller, landlord)
 
 Investor (user, payout_account)
  └── RevenueShareAgreement (organization?, basis, rate_percent, cadence)
 
-Caregiver (user)
+Caretaker (user)
  └── CaretakerAssignment (property, effective_start, effective_end)
 
-MaintenanceTicket (unit, tenant, assigned_caretaker, status)
-
-Payment (invoice, mpesa_transaction_id, amount, raw_callback_payload)
- └── FeeLedgerEntry (platform_fee_amount, reseller_commission_amount, reseller, invoiced)
-      └── FeeInvoice (via M2M)
+Invoice (reference, status, due_date)
+ └── Payment (mpesa_transaction_id, amount, raw_callback_payload)
+      └── FeeLedgerEntry (platform_fee_amount, reseller_commission_amount, reseller, invoiced)
+           └── FeeInvoice (via M2M)
+                └── STKPushRequest (platform-fee collection push; landlord_credential blank)
+ └── STKPushRequest (tenant-rent push; landlord_credential set) — same model, model-level
+     clean() enforces exactly one of invoice/fee_invoice is set
 
 Disbursement (recipient_type, reseller|investor, amount, status, mpesa_conversation_id)
+ — clean() enforces recipient_type matches which FK is set
 
 NotificationTemplate (name, meta_template_id, body, variables, approval_status, version)
- └── WhatsAppMessage (direction, phone_number, body, delivery_status, related_object)
+ └── WhatsAppMessage (direction, phone_number, body, delivery_status, meta_message_id, related_object)
+
+PlatformCredential (key, environment, value — encrypted)
+PlatformApiClient (client_id, client_secret_hash, landlord?, scopes, is_active)
 
 AuditLog (actor, action, target_object_type, target_object_id, reason, metadata)
 ```
 
+### Auth & RBAC
+
+Two independent authentication mechanisms, never interchangeable:
+
+- **JWT** (`rest_framework_simplejwt`) — every internal, user-facing endpoint
+  under `/api/`. Login is username/password (`POST /api/auth/login/`) or
+  phone OTP (`POST /api/auth/otp/request/` → `/api/auth/otp/verify/`, real
+  email delivery via Resend; WhatsApp OTP delivery is logged-only until a
+  Meta-pre-approved OTP template exists — an external approval step, not a
+  code gap). Tokens carry `role` and `is_super_admin` claims
+  (`accounts/serializers.py::RoleTokenObtainPairSerializer`).
+- **OAuth2 client-credentials** (`api_auth`) — external integrators only,
+  under `/api/external/`. `POST /api/oauth/token/` exchanges a
+  `client_id`/`client_secret` (issued via `manage.py create_api_client`,
+  rotated via `manage.py rotate_api_client_secret`) for a scoped, short-lived
+  Bearer token. Rate-limited (10/min/IP) since it's a credential-exchange
+  endpoint with nothing else in front of it. Scopes are drawn from a fixed
+  registry (`api_auth.models.Scope`), not free text.
+  `api_auth/tests.py::TokenTypeIsolationTests` proves the two token types can
+  never substitute for each other.
+
+**RBAC** has two layers, both driven by the same `accounts.models.Role`:
+- *API-level*: DRF permission classes (`accounts/permissions.py` —
+  `IsLandlord`, `IsTenant`, `IsAdmin`, `IsSuperAdmin`, `IsPlatformStaff`,
+  `IsSelfOrAdmin`) plus per-view `get_queryset()` scoping. Newer viewsets
+  (billing/partners JSON APIs) use the shared
+  `accounts/rbac.py::resolve_actor_scope(user)` resolver instead of
+  duplicating the `hasattr(user, "<x>_profile")` pattern inline.
+- *Admin-level*: a `post_save` signal on `User`
+  (`accounts/signals.py::sync_role_group`) keeps each user in a matching
+  Django `Group` (`role:admin`, `role:landlord`, ...) and auto-grants
+  `is_staff` to `role=admin` users (never auto-revoked). `python manage.py
+  sync_role_permissions` then grants that `role:admin` group real Django
+  model permissions for the admin UI: view/add/change on operational models,
+  **no delete** on financial records (`Payment`, `FeeLedgerEntry`,
+  `Disbursement`), **zero access** to anything secret-bearing
+  (`PlatformCredential`, `LandlordDarajaCredential`, `LandlordKRACredential`,
+  `PlatformApiClient` — superuser-only). Re-running the command is safe;
+  it fully replaces the group's permission set each time.
+
+### Admin UI
+
+**Theme:** [django-unfold](https://github.com/unfoldadmin/django-unfold) —
+the only admin surface in the backend, and there are no custom-built JS admin
+pages anywhere in this codebase. Every app's `ModelAdmin` is Unfold-based,
+with:
+- Inlines (e.g. read-only `PaymentInline` on `InvoiceAdmin` — payments are
+  webhook-created, never hand-entered).
+- `autocomplete_fields` throughout FK-heavy admins.
+- Bulk actions: resend a payment receipt, initiate/mark-paid a `FeeInvoice`,
+  approve/reject a `NotificationTemplate`, retry a failed `Disbursement`.
+- Secret-bearing models (`LandlordDarajaCredential`, `LandlordKRACredential`,
+  `PlatformCredential`) use a password-style widget
+  (`credentials/admin_utils.py::SecretWidgetMixin`) that never pre-fills the
+  decrypted current value — a blank submission on an *existing* row means
+  "keep the current value," not "erase it." These fields stay genuinely
+  editable (the whole point of `EncryptedSecretField` is DB-driven,
+  redeploy-free credential entry) — access control lives in RBAC
+  (superuser-only), not in making the fields read-only.
+- Static assets served by whitenoise (`WhiteNoiseMiddleware`,
+  `CompressedManifestStaticFilesStorage`) — there's no nginx/static-file
+  layer anywhere else in this repo, so the Dockerfile runs `collectstatic`
+  at build time.
+
 ### API Layer
 
-**Framework:** Django REST Framework (DRF)
+**Framework:** Django REST Framework, `drf-spectacular` for OpenAPI 3 schema
+generation.
 
-**Authentication:** Session + Token
+**Default permission:** `IsAuthenticated` (except explicitly `AllowAny`
+views: login, OTP, token exchange, and the docs routes themselves).
 
-**Default permission:** `IsAuthenticated`
+**Documentation:** `/api/docs/` (Swagger UI), `/api/redoc/`, `/api/schema/`
+are all **publicly readable without login**
+(`SPECTACULAR_SETTINGS['SERVE_PERMISSIONS'] = [AllowAny]` — this overrides
+the global default for these three views only). No actual data is exposed,
+only endpoint/schema shapes. Linked from the Unfold admin sidebar too.
 
-**Current endpoints:**
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| GET | `/api/landlord/tenants/?active=true` | List active leases (scoped to landlord's properties) |
-| POST | `/api/landlord/tenants/` | Onboard tenant onto a unit |
-| POST | `/api/landlord/tenants/{id}/offboard/` | Terminate lease, free unit |
-
-**Endpoint detail:** `backend/leasing/api_views.py` — `LandlordTenantViewSet`
-
-- `get_queryset()` filters leases to only units in the requesting landlord's properties
-- `TenantOnboardSerializer` reuses existing User/Tenant by phone number, validates unit belongs to landlord and is vacant
-- `LeaseOffboardSerializer` sets lease to TERMINATED and unit to VACANT
+Full endpoint list: **`pms-endpoints.md`**.
 
 ### Celery Pipelines
 
-**Broker:** Redis (`redis://redis:6379/0`)
+**Broker:** Redis. **Scheduler:** `django_celery_beat` `DatabaseScheduler` —
+schedules are DB rows (`PeriodicTask`), not code, and **nothing is scheduled
+by default**. `python manage.py seed_periodic_tasks` idempotently seeds all
+five:
 
-**Scheduler:** Django Celery Beat with DatabaseScheduler
-
-**Tasks in `billing/tasks.py`:**
-
-| Task | Trigger | Purpose |
+| Task | Cadence | Purpose |
 |------|---------|---------|
-| `ingest_c2b_confirmation` | C2B webhook | Idempotently record Payment + FeeLedgerEntry from Safaricom callback |
-| `generate_fee_invoices` | Celery Beat (monthly) | Roll up uninvoiced FeeLedgerEntries into a FeeInvoice per landlord |
-| `reconcile_landlord_transactions` | Celery Beat (nightly) | Cross-check Payments against Safaricom Transaction Status API |
-| `reconcile_all_landlords` | Celery Beat (nightly) | Fan out per-landlord reconciliation |
+| `billing.tasks.generate_fee_invoices` | monthly | Rolls up uninvoiced `FeeLedgerEntry` rows per landlord into a `FeeInvoice`, scoped to entries whose *payment* landed within the invoice's stated period. |
+| `billing.tasks.reconcile_all_landlords` → `reconcile_landlord_transactions` | nightly | Cross-checks recent `Payment`s against Safaricom's Transaction Status API; a mismatch persists an `AuditLog` entry. |
+| `partners.tasks.sweep_reseller_payouts` | monthly | B2C payout of accrued reseller commission. |
+| `partners.tasks.sweep_investor_payouts` | monthly | B2C payout plumbing works; the revenue-share **amount computation** itself (`_compute_revenue_share_amount`) is a documented Phase 4+ TODO — a real accounting question, not a payout-mechanics gap. |
+| `messaging.tasks.send_rent_reminders` | daily | One `rent_reminder` WhatsApp template per invoice due soon/overdue, deduped per invoice per day. |
 
-**Tasks in `partners/tasks.py`:**
-
-| Task | Purpose |
-|------|---------|
-| `sweep_reseller_payouts` | Aggregate pending reseller commissions into Disbursements |
-| `sweep_investor_payouts` | Aggregate pending investor revenue share into Disbursements |
+Money math throughout `billing/tasks.py` is `decimal.Decimal` with
+`ROUND_HALF_UP` — never binary float. Idempotency on the two hot paths
+(`_record_payment`'s `Payment.mpesa_transaction_id` uniqueness,
+`ingest_stk_callback`'s `STKPushRequest.status` check) is race-hardened:
+a lost create-race raises `IntegrityError`, which is caught and treated as
+"another delivery already recorded it," and the STK callback path uses
+`select_for_update()` inside `transaction.atomic()` so two near-simultaneous
+deliveries of the same Safaricom callback can't both proceed.
 
 ### Webhooks
 
-All webhooks are on `/webhooks/...` so host Nginx can apply a stricter rate limit.
-
-| Method | Path | Status |
-|--------|------|--------|
-| POST | `/webhooks/mpesa/c2b/validation/` | Stub — always accept |
-| POST | `/webhooks/mpesa/c2b/confirmation/` | Routes to `ingest_c2b_confirmation.delay(payload)` |
-| POST | `/webhooks/mpesa/b2c/result/` | Stub — not wired to Disbursement yet |
-| POST | `/webhooks/mpesa/b2c/timeout/` | Stub — no retry logic yet |
-
-Security notes:
-- `@csrf_exempt` — Safaricom cannot send CSRF tokens
-- Real deployment must verify Safaricom IP ranges at Nginx layer
-- `ingest_c2b_confirmation` validates shortcode against known `LandlordDarajaCredential` before any side effect
+All on `/webhooks/...` so host Nginx/a WAF can apply a stricter, separate
+rate limit than the rest of the API — plain Django views, not DRF, so they
+never appear in the OpenAPI schema. Full list: **`pms-endpoints.md`**.
+Security: `@csrf_exempt` (Safaricom/Meta can't send CSRF tokens); the
+WhatsApp webhook additionally verifies Meta's `X-Hub-Signature-256` HMAC and
+**fails closed** if no app secret is configured. A real deployment must also
+allowlist Safaricom's IP ranges at the Nginx/WAF layer.
 
 ### Integrations
 
-**`integrations/daraja.py`** — Safaricom Daraja client (STUBBED)
+**`integrations/daraja.py`** — real Safaricom Daraja HTTP client (OAuth2
+token fetch, STK Push, B2C payout, transaction status query), used in two
+distinct credential contexts: `DarajaClient.for_landlord(credential)` (a
+specific landlord's own shortcode) and `DarajaClient.for_platform()` (the
+platform's own Daraja app, for fee collection and B2C payouts, sourced from
+`credentials.PlatformCredential` rows).
 
-- `DarajaClient.for_landlord(credential)` — builds client for landlord's own shortcode
-- `DarajaClient.for_platform()` — builds client for platform's own Daraja app
-- `initiate_stk_push()` — STK Push for rent/fee collection
-- `initiate_b2c_payment()` — B2C payout to reseller/investor
-- `query_transaction_status()` — nightly reconciliation
+**`integrations/whatsapp.py`** — real Meta WhatsApp Cloud API client:
+`send_session_message` (free-form, within Meta's 24h customer-initiated
+window), `send_template_message` (pre-approved templates, works outside that
+window), `parse_inbound_webhook` (extracts text/button/interactive-reply
+messages), `parse_status_updates` (extracts delivery-status callbacks —
+`sent`/`delivered`/`read`/`failed`).
 
-Every method raises `NotImplementedError` with a `TODO(M2)` marker. The rest of
-the codebase is built against these signatures, so wiring real credentials is a
-find/replace inside this file only.
-
-**`integrations/whatsapp.py`** — Meta WhatsApp Cloud API client (STUBBED)
+Both clients are fully implemented — the only thing that's environment-specific
+is whether real credentials have been entered (`LandlordDarajaCredential`
+rows per landlord, `PlatformCredential` rows platform-wide, all
+`EncryptedSecretField`, editable from `/admin/` without a redeploy). No
+`NotImplementedError` stubs remain anywhere in the integration layer.
 
 ---
 
@@ -198,7 +267,7 @@ find/replace inside this file only.
 /landlord            → Landlord dashboard
 /reseller            → Reseller dashboard
 /investor            → Investor dashboard
-/caretaker           → Caretaker dashboard
+/caretaker            → Caretaker dashboard
 /admin               → Admin console
 ```
 
@@ -211,40 +280,12 @@ find/replace inside this file only.
 | `components/KPICard.tsx` | Metric card with title, value, trend, icon, and accent color |
 | `components/ChartCard.tsx` | Chart wrapper with title, description, and border |
 | `components/DataTable.tsx` | Generic reusable table with column renderers |
-| `components/Icons.tsx` | 14 inline SVG icon components |
+| `components/Icons.tsx` | Inline SVG icon components |
 
-### Dashboard Pages
-
-Each dashboard page follows the same pattern:
-1. Page header with title and description
-2. KPI grid (4 cards)
-3. Charts section (2-column or 3-column grid)
-4. Data tables section
-
-**Landlord (`/landlord`):**
-- KPIs: Total Properties, Occupied Units, Revenue (MTD), Open Tickets
-- Charts: Revenue vs Platform Fees (bar), Occupancy by Property (donut)
-- Tables: Recent Payments, Maintenance Tickets
-
-**Reseller (`/reseller`):**
-- KPIs: Referred Landlords, Commission Earned, Pending Payout, Avg Commission Rate
-- Charts: Commission Trend (bar), Payout Status (donut)
-- Tables: Referred Landlords, Payout History
-
-**Investor (`/investor`):**
-- KPIs: Revenue Share, Pending Payout, Active Agreements, Next Disbursement
-- Charts: Revenue Share Trend (bar), Agreement Summary (cards)
-- Tables: Active Agreements, Disbursement History
-
-**Caretaker (`/caretaker`):**
-- KPIs: Assigned Properties, Open Tickets, Avg Response Time, Resolution Rate
-- Charts: Weekly Ticket Volume (bar), Assigned Properties (cards)
-- Tables: Ticket Queue with status badges and icons
-
-**Admin (`/admin`):**
-- KPIs: Total Users, Active Landlords, System Health, Pending Reviews
-- Charts: System Metrics (grid), Onboarding Queue (cards)
-- Tables: Recent Audit Log
+Dashboards currently render mock data. The backend now has real JSON
+endpoints they could consume (`/api/billing/...`, `/api/partners/...`,
+`/api/landlord/tenants/`, `/api/taxes/returns/`) — wiring the frontend to
+them is separate, not-yet-started work.
 
 ---
 
@@ -253,96 +294,101 @@ Each dashboard page follows the same pattern:
 ### Rent Collection Flow
 
 ```
-Tenant sends "Pay Rent" via WhatsApp
+Tenant sends "Pay Rent" via WhatsApp (or calls POST /api/billing/invoices/{id}/pay/)
     ↓
-messaging/webhook_views.py (inbound webhook)
+messaging/services.py::trigger_stk_push_for_tenant
+  — same billing/services.py::initiate_invoice_payment the authenticated
+    API uses, so STKPushRequest is always written regardless of entrypoint
     ↓
-messaging/tasks.py (process message)
+DarajaClient.for_landlord(credential).initiate_stk_push()
     ↓
-messaging/services.py (trigger_stk_push_for_tenant)
-    ├── Find tenant by phone
-    ├── Find active lease
-    ├── Find open invoice
-    ├── Resolve landlord's LandlordDarajaCredential
-    └── DarajaClient.initiate_stk_push() ← STUBBED
+Tenant enters M-Pesa PIN
     ↓
-Tenant receives M-Pesa STK Push prompt
+Safaricom calls /webhooks/mpesa/stk/callback/ (or /c2b/confirmation/ for a
+manual Paybill-menu payment)
     ↓
-Tenant enters PIN on their phone
+billing/tasks.py::ingest_stk_callback / ingest_c2b_confirmation
     ↓
-Safaricom processes payment on LANDLORD's shortcode
-    ↓
-Safaricom calls /webhooks/mpesa/c2b/confirmation/
-    ↓
-billing/webhook_views.py → ingest_c2b_confirmation.delay(payload)
-    ↓
-Celery task:
-    ├── Look up LandlordDarajaCredential by shortcode
-    ├── Dedupe on mpesa_transaction_id (DB unique constraint)
-    ├── Create Payment record
-    ├── Calculate platform fee (5% of rent)
-    ├── Calculate reseller commission (10% of platform fee)
-    └── Create FeeLedgerEntry
+_record_payment (idempotent, Decimal math):
+    ├── Create Payment
+    ├── Platform fee = amount × settings.PLATFORM_FEE_RATE (Decimal, ROUND_HALF_UP)
+    ├── Reseller commission = platform_fee × rule.rate_percent (if referred)
+    ├── Create FeeLedgerEntry
+    └── invoice.refresh_status() + send_payment_receipt_email.delay()
 ```
 
-### Fee & Commission Flow
+### Fee Collection Flow (landlord → platform)
 
 ```
-Nightly / Monthly Celery Beat triggers generate_fee_invoices
+generate_fee_invoices (monthly) rolls up uninvoiced FeeLedgerEntry rows,
+scoped to the invoice's stated period, into one FeeInvoice per landlord
     ↓
-For each landlord:
-    ├── Sum all uninvoiced FeeLedgerEntries
-    └── Create FeeInvoice, mark entries as invoiced
-
-FeeInvoice status:
-    - open → awaiting landlord payment
-    - paid → landlord paid via STK Push
-    - overdue → past due_date
+Admin action "Initiate STK push" (FeeInvoiceAdmin) → billing/services.py::
+initiate_fee_invoice_payment — same STKPushRequest/webhook plumbing as
+tenant rent, but via DarajaClient.for_platform() and discriminated by
+STKPushRequest.fee_invoice (vs .invoice) being set
+    ↓
+/webhooks/mpesa/stk/callback/ → ingest_stk_callback branches on
+stk_request.fee_invoice_id → _record_fee_invoice_payment → FeeInvoice.mark_paid()
 ```
+(A manual "mark paid" admin action exists as a reconciliation fallback —
+no Payment/FeeLedgerEntry is created for this direction of money flow;
+those model tenant→landlord rent specifically.)
 
-### Payout Flow
+### Payout Flow (platform → reseller/investor)
 
 ```
-Celery Beat triggers sweep_reseller_payouts / sweep_investor_payouts
+sweep_reseller_payouts / sweep_investor_payouts (monthly)
     ↓
-Aggregate pending commissions / revenue share
+Create Disbursement (model-level clean() enforces recipient_type matches
+the set FK)
     ↓
-Create Disbursement records
+DarajaClient.for_platform().initiate_b2c_payment()
     ↓
-DarajaClient.initiate_b2c_payment() ← STUBBED
-    ↓
-Safaricom calls /webhooks/mpesa/b2c/result/
-    ↓
-Update Disbursement status to confirmed
+/webhooks/mpesa/b2c/result/ → handle_b2c_result → Disbursement.status =
+CONFIRMED/FAILED, WhatsApp confirmation to the recipient on success
 ```
 
 ### Maintenance Flow
 
 ```
-Tenant reports issue via WhatsApp or app
+Tenant reports issue via WhatsApp ("Report issue: <description>")
     ↓
-Create MaintenanceTicket (unit, tenant, category, description)
+messaging/services.py::create_maintenance_ticket_for_tenant → MaintenanceTicket (OPEN, unassigned)
     ↓
-Admin/Caretaker assigns ticket
+Admin/landlord assigns a caretaker
     ↓
-Caretaker resolves ticket
+maintenance/signals.py::_notify_on_caretaker_assignment → WhatsApp to caretaker
     ↓
-WhatsApp notification sent to tenant (via messaging/tasks.py)
+Caretaker resolves the ticket (status → RESOLVED)
+    ↓
+maintenance/signals.py::_handle_resolution → auto-sets resolved_at,
+notifies the reporting tenant via WhatsApp
 ```
 
-### Messaging Flow
+### WhatsApp Messaging Flow
 
 ```
 Outbound:
-    ├── Rent reminders (scheduled via Celery Beat)
-    ├── Payment confirmations (triggered by webhook)
-    ├── Maintenance status updates
-    └── Onboarding messages
+    ├── Intent-response replies (send_whatsapp_reply — free-form, within
+    │   Meta's 24h session window)
+    ├── Rent reminders (send_rent_reminders, daily — send_whatsapp_template,
+    │   works outside the session window, requires an APPROVED
+    │   NotificationTemplate, sets WhatsAppMessage.template_used)
+    ├── Payment confirmations (webhook-triggered receipt email; WhatsApp
+    │   confirmation on payout)
+    └── Maintenance status updates (assignment, resolution)
 
 Inbound:
-    ├── WhatsApp webhook receives message
-    ├── Classify intent (pay rent, report issue, etc.)
-    └── Trigger appropriate action
+    ├── HMAC-signature-verified webhook (fails closed with no app secret)
+    ├── Phone number normalized (accounts/phone.py::normalize_msisdn) before
+    │   tenant lookup — Meta sends bare-digit MSISDNs, User.phone_number is
+    │   stored E.164; this match was silently broken before the fix
+    ├── Intent classification (plain string matching — Pay Rent / Balance /
+    │   Caretaker / Report Issue), unclassified input gets a menu fallback
+    │   reply instead of silent drop
+    └── Meta's delivery-status callbacks (sent/delivered/read/failed) update
+        WhatsAppMessage.delivery_status via meta_message_id correlation
 ```
 
 ---
@@ -367,16 +413,19 @@ docker compose up --build
 ```
 
 Backend services:
-- Django: `http://localhost:8000` (inside Docker network)
+- Django (Unfold admin at `/admin/`, public API docs at `/api/docs/`):
+  `http://localhost:8000`
 - Celery Worker: auto-started
-- Celery Beat: auto-started
+- Celery Beat: auto-started (schedules must still be seeded — see below)
 - Postgres: `localhost:5432`
 - Redis: `localhost:6379`
 
-**Apply migrations:**
+**Apply migrations, then run one-time setup:**
 ```bash
 docker compose exec backend python manage.py migrate
 docker compose exec backend python manage.py createsuperuser
+docker compose exec backend python manage.py sync_role_permissions
+docker compose exec backend python manage.py seed_periodic_tasks
 ```
 
 **Run tests:**
@@ -403,29 +452,37 @@ docker compose up --build
 
 ---
 
-## Milestone Status
+## Status
 
-| Milestone | Status | Notes |
-|-----------|--------|-------|
-| M0 | Done | Project scaffold, Docker Compose, 10 Django apps |
-| M1 | Done | All models, admin, migrations, smoke-tested ORM chain |
-| M2 | Pending | Real Daraja credentials + secrets manager |
-| M3 | Pending | WhatsApp Cloud API wiring |
-| M4 | Pending | B2C payout webhook wiring, reconciliation |
-| M5 | Pending | Frontend connected to live DRF APIs |
+The M0/M1 "scaffold" framing this document used to carry is gone — every
+app has real, tested logic behind it, not just a schema. What's left is
+narrower and mostly operational, not architectural:
 
-**What works now:**
-- Full Django ORM object chain (create via admin)
-- C2B webhook → Celery task → idempotent Payment + FeeLedgerEntry
-- Platform fee and reseller commission math
-- Fee invoice generation
-- Tenant onboarding/offboarding via DRF
-- Frontend dashboard with mock data
+**Genuinely blocked on external dependencies:**
+- Real Daraja credentials (sandbox at minimum) for at least one test
+  landlord shortcode, plus the platform's own Daraja app.
+- Real WhatsApp Cloud API access (Meta app, phone number ID, access token) —
+  `integrations/whatsapp.py` is a complete client, it just has nothing to
+  call with yet.
+- A Meta-pre-approved WhatsApp OTP template, before OTP delivery over
+  WhatsApp (vs. email, which works today) can go live.
+- The manual Safaricom-portal step (registering each landlord's C2B
+  validation/confirmation URLs against their shortcode) — tracked as
+  `LandlordDarajaCredential.c2b_urls_registered`.
 
-**What needs real credentials before going live:**
-- `integrations/daraja.py` — all methods are `NotImplementedError`
-- `integrations/whatsapp.py` — all methods are `NotImplementedError`
-- `LandlordDarajaCredential.c2b_urls_registered` — manual Safaricom portal step
+**Deliberately deferred (Phase 4+), not credential-blocked:**
+- Per-landlord platform fee rates (currently one global
+  `settings.PLATFORM_FEE_RATE`).
+- Investor revenue-share amount computation
+  (`partners.tasks._compute_revenue_share_amount` — the B2C payout
+  mechanics work; the accounting formula behind the number doesn't exist
+  yet).
+- Platform B2C float-balance safety check before a payout sweep
+  (`partners.tasks._check_platform_float`).
+
+**Not started:**
+- Wiring the Next.js frontend to the real JSON endpoints (it renders mock
+  data today; the endpoints exist).
 
 ---
 
@@ -436,15 +493,19 @@ docker compose up --build
 | **Daraja** | Safaricom's API gateway for M-Pesa |
 | **C2B** | Customer-to-Business payment (tenant paying landlord) |
 | **B2C** | Business-to-Customer payout (platform paying reseller/investor) |
-| **STK Push** | M-Pesa push notification asking user to enter PIN |
-| **FeeInvoice** | Monthly bill the platform sends a landlord for accumulated fees |
-| **FeeLedgerEntry** | Single fee record created per confirmed payment |
-| **Disbursement** | A B2C payout batch to a reseller or investor |
-| **LandlordDarajaCredential** | Per-landlord Paybill/Till credentials for Option B |
-| **Option B** | Each landlord keeps their own M-Pesa shortcode; platform never holds tenant funds |
-| **Celery Beat** | Scheduled task runner (like cron, but inside Django) |
+| **STK Push** | M-Pesa push notification asking the user to enter their PIN |
+| **FeeInvoice** | Periodic bill the platform sends a landlord for accumulated platform fee — collected via its own STK Push flow, distinct from tenant rent |
+| **FeeLedgerEntry** | Single fee record created per confirmed tenant payment |
+| **Disbursement** | A B2C payout to a reseller or investor |
+| **LandlordDarajaCredential** | Per-landlord Paybill/Till credentials for Option B, encrypted at rest |
+| **Option B** | Each landlord keeps their own M-Pesa shortcode; the platform never holds tenant funds |
+| **RBAC** | `Role` → Django `Group` sync + `sync_role_permissions`; see **Auth & RBAC** above |
+| **OAuth2 client-credentials** | The external-integrator token grant (`api_auth`) — distinct from user JWT login |
+| **Unfold** | The Django admin theme; the only admin UI in this backend |
+| **Celery Beat** | Scheduled task runner (DB-driven via `django_celery_beat`; nothing runs until `seed_periodic_tasks` is run) |
 | **Onboarding Status** | Pending → Sandbox Testing → Awaiting C2B URL Registration → Live |
 
 ---
 
-*Generated on 2026-08-20*
+*Last substantively updated 2026-09-22 — Unfold admin, RBAC, OAuth
+hardening, billing/WhatsApp refinement, public OpenAPI docs.*
