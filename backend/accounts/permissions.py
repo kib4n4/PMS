@@ -78,6 +78,20 @@ class IsSuperAdmin(BasePermission):
         return bool(request.user and request.user.is_authenticated and request.user.is_superuser)
 
 
+class IsPlatformStaff(BasePermission):
+    """Dime staff role OR a real superuser — the union IsAdmin/IsSuperAdmin
+    deliberately keep separate for narrower use elsewhere. Use this where
+    an endpoint should admit either tier rather than exactly one (see
+    accounts/rbac.py::resolve_actor_scope, which computes the same union
+    for object-scoped querysets)."""
+
+    message = "Only Dime staff or super admin accounts can perform this action."
+
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(user and user.is_authenticated and (user.is_superuser or user.role == Role.ADMIN))
+
+
 class IsSelfOrAdmin(BasePermission):
     """Object-level: the requester IS the target object, or is Dime
     staff/super admin. Useful for user-owned-resource endpoints where

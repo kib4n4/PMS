@@ -1,8 +1,11 @@
 # backend/billing/tests.py
 
 from datetime import date, timedelta
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework import status
@@ -15,7 +18,8 @@ from leasing.models import Lease, LeaseStatus, Tenant
 from partners.models import ReferralCommissionRule, Reseller, PayoutAccount
 from properties.models import Property, Unit
 
-from .models import FeeLedgerEntry, Invoice, InvoiceStatus, Payment, STKPushRequest, STKPushRequestStatus
+from .models import FeeInvoice, FeeInvoiceStatus, FeeLedgerEntry, Invoice, InvoiceStatus, Payment, STKPushRequest, STKPushRequestStatus
+from .services import initiate_fee_invoice_payment
 from .tasks import _record_payment, _resolve_invoice, generate_fee_invoices, ingest_c2b_confirmation, ingest_stk_callback
 
 
@@ -163,6 +167,34 @@ class RecordPaymentFeeMathTests(TestCase):
         self.assertIsNone(second)
         self.assertEqual(Payment.objects.filter(mpesa_transaction_id="TXNDUPE").count(), 1)
 
+    def test_fee_rounds_with_decimal_half_up_not_float(self):
+        # 246.90 * 0.05 = 12.345 exactly in Decimal (rounds to 12.35 under
+        # ROUND_HALF_UP); in binary float, 246.90 * 0.05 == 12.344999999999999,
+        # which round()s down to 12.34 — the bug this fix closes.
+        credential, lease = _build_lease(rent_amount=Decimal("246.90"), shortcode="600900")
+        invoice = _build_invoice(lease, amount_due=Decimal("246.90"))
+        payment = _record_payment(
+            invoice=invoice, credential=credential, amount=Decimal("246.90"),
+            transaction_id="TXNROUND", raw_payload={},
+        )
+        entry = FeeLedgerEntry.objects.get(payment=payment)
+        self.assertEqual(entry.platform_fee_amount, Decimal("12.35"))
+
+    def test_integrity_error_race_is_treated_as_duplicate(self):
+        """Simulates two near-simultaneous deliveries of the same callback
+        both passing the pre-check before either commits — the DB unique
+        constraint's IntegrityError must be caught, not propagated."""
+        credential, lease = _build_lease(shortcode="601000")
+        invoice = _build_invoice(lease, amount_due=10000)
+
+        with patch("billing.models.Payment.objects.create", side_effect=IntegrityError("duplicate key")):
+            result = _record_payment(
+                invoice=invoice, credential=credential, amount=10000,
+                transaction_id="TXNRACE", raw_payload={},
+            )
+        self.assertIsNone(result)
+        self.assertFalse(Payment.objects.filter(mpesa_transaction_id="TXNRACE").exists())
+
 
 class IngestC2BConfirmationTests(TestCase):
     def test_unknown_shortcode_creates_no_payment(self):
@@ -287,6 +319,182 @@ class GenerateFeeInvoicesTests(TestCase):
         fee_invoice = credential.landlord.fee_invoices.get()
         self.assertEqual(float(fee_invoice.total_amount), float(entry.platform_fee_amount))
 
+    def test_aggregates_multiple_entries_correctly(self):
+        credential, lease = _build_lease(rent_amount=10000, shortcode="500650")
+        for i, amount in enumerate([1000, 2000, 3000]):
+            invoice = _build_invoice(lease, amount_due=amount)
+            _record_payment(
+                invoice=invoice, credential=credential, amount=amount,
+                transaction_id=f"TXNAGG{i}", raw_payload={},
+            )
+        # 5% of (1000+2000+3000) = 300
+        generate_fee_invoices()
+        fee_invoice = credential.landlord.fee_invoices.get()
+        self.assertEqual(fee_invoice.total_amount, Decimal("300.00"))
+
+    def test_entry_outside_period_window_is_not_invoiced(self):
+        credential, lease = _build_lease(rent_amount=10000, shortcode="500700")
+        invoice = _build_invoice(lease, amount_due=10000)
+        payment = _record_payment(
+            invoice=invoice, credential=credential, amount=10000,
+            transaction_id="TXNOUTOFPERIOD", raw_payload={},
+        )
+        entry = FeeLedgerEntry.objects.get(payment=payment)
+
+        # A period entirely before the payment's received_at — the entry
+        # must stay un-invoiced rather than being swept up regardless of
+        # when it actually landed.
+        yesterday = timezone.now().date() - timedelta(days=1)
+        generate_fee_invoices(period_start=yesterday - timedelta(days=5), period_end=yesterday)
+
+        entry.refresh_from_db()
+        self.assertFalse(entry.invoiced)
+        self.assertFalse(credential.landlord.fee_invoices.exists())
+
+
+class FeeInvoicePaymentFlowTests(TestCase):
+    """billing/services.py::initiate_fee_invoice_payment + the STK
+    callback's fee_invoice branch — previously FeeInvoiceStatus.PAID and
+    mpesa_transaction_id were defined but nothing ever set them."""
+
+    def _make_fee_invoice(self, total_amount=1000):
+        org = Organization.objects.create(name="Fee Org")
+        landlord_user = User.objects.create_user(
+            username="fee-landlord", role=Role.LANDLORD, phone_number="+254711555000"
+        )
+        landlord = Landlord.objects.create(organization=org, user=landlord_user, full_name="Fee Landlord")
+        return FeeInvoice.objects.create(
+            landlord=landlord,
+            period_start=date.today().replace(day=1),
+            period_end=date.today(),
+            total_amount=total_amount,
+        )
+
+    def test_reference_is_auto_generated_with_distinct_prefix(self):
+        fee_invoice = self._make_fee_invoice()
+        self.assertTrue(fee_invoice.reference.startswith("FEE"))
+
+    def test_mark_paid_is_idempotent(self):
+        fee_invoice = self._make_fee_invoice()
+        fee_invoice.mark_paid(mpesa_transaction_id="TXNFEEMANUAL")
+        self.assertEqual(fee_invoice.status, FeeInvoiceStatus.PAID)
+        self.assertEqual(fee_invoice.mpesa_transaction_id, "TXNFEEMANUAL")
+
+        # Calling again (e.g. duplicate webhook) must not error or overwrite.
+        fee_invoice.mark_paid(mpesa_transaction_id="TXNFEEMANUAL")
+        fee_invoice.refresh_from_db()
+        self.assertEqual(fee_invoice.status, FeeInvoiceStatus.PAID)
+
+    @patch("billing.services.DarajaClient.for_platform")
+    def test_initiate_fee_invoice_payment_uses_landlord_phone_by_default(self, mock_for_platform):
+        mock_client = MagicMock()
+        mock_client.initiate_stk_push.return_value = STKPushResult(
+            checkout_request_id="ws_CO_FEE1", merchant_request_id="mr_fee1", response_description="Accepted"
+        )
+        mock_for_platform.return_value = mock_client
+
+        fee_invoice = self._make_fee_invoice(total_amount=500)
+        stk_request = initiate_fee_invoice_payment(fee_invoice)
+
+        self.assertEqual(stk_request.fee_invoice_id, fee_invoice.id)
+        self.assertIsNone(stk_request.invoice_id)
+        self.assertIsNone(stk_request.landlord_credential_id)
+        self.assertEqual(stk_request.phone_number, "+254711555000")
+        mock_client.initiate_stk_push.assert_called_once_with(
+            phone_number="+254711555000", amount="500", account_reference=fee_invoice.reference
+        )
+
+    def test_stk_callback_marks_fee_invoice_paid(self):
+        fee_invoice = self._make_fee_invoice(total_amount=750)
+        STKPushRequest.objects.create(
+            fee_invoice=fee_invoice, checkout_request_id="ws_CO_FEE2",
+            merchant_request_id="mr_fee2", phone_number="+254711555000", amount=750,
+        )
+
+        ingest_stk_callback({
+            "Body": {"stkCallback": {
+                "MerchantRequestID": "mr_fee2", "CheckoutRequestID": "ws_CO_FEE2",
+                "ResultCode": 0, "ResultDesc": "Success",
+                "CallbackMetadata": {"Item": [
+                    {"Name": "Amount", "Value": 750},
+                    {"Name": "MpesaReceiptNumber", "Value": "TXNFEESTK"},
+                ]},
+            }}
+        })
+
+        fee_invoice.refresh_from_db()
+        self.assertEqual(fee_invoice.status, FeeInvoiceStatus.PAID)
+        self.assertEqual(fee_invoice.mpesa_transaction_id, "TXNFEESTK")
+        # No Payment/FeeLedgerEntry is created for a platform-fee collection —
+        # those model tenant->landlord rent, not landlord->platform fee.
+        self.assertFalse(Payment.objects.filter(mpesa_transaction_id="TXNFEESTK").exists())
+
+    def test_duplicate_fee_invoice_callback_is_idempotent(self):
+        fee_invoice = self._make_fee_invoice(total_amount=400)
+        STKPushRequest.objects.create(
+            fee_invoice=fee_invoice, checkout_request_id="ws_CO_FEE3",
+            merchant_request_id="mr_fee3", phone_number="+254711555000", amount=400,
+        )
+        payload = {
+            "Body": {"stkCallback": {
+                "MerchantRequestID": "mr_fee3", "CheckoutRequestID": "ws_CO_FEE3",
+                "ResultCode": 0, "ResultDesc": "Success",
+                "CallbackMetadata": {"Item": [
+                    {"Name": "Amount", "Value": 400},
+                    {"Name": "MpesaReceiptNumber", "Value": "TXNFEEDUPE"},
+                ]},
+            }}
+        }
+        ingest_stk_callback(payload)
+        # Second delivery hits the "already resolved" short-circuit (status
+        # is no longer PENDING) rather than the fee_invoice branch at all.
+        ingest_stk_callback(payload)
+
+        fee_invoice.refresh_from_db()
+        self.assertEqual(fee_invoice.status, FeeInvoiceStatus.PAID)
+        self.assertEqual(fee_invoice.mpesa_transaction_id, "TXNFEEDUPE")
+
+
+class STKPushRequestValidationTests(TestCase):
+    def test_requires_exactly_one_of_invoice_or_fee_invoice(self):
+        credential, lease = _build_lease(shortcode="601100")
+        invoice = _build_invoice(lease)
+        neither = STKPushRequest(checkout_request_id="x1", phone_number="+254700000000", amount=100)
+        with self.assertRaises(ValidationError):
+            neither.clean()
+
+        both = STKPushRequest(
+            checkout_request_id="x2", phone_number="+254700000000", amount=100,
+            invoice=invoice, landlord_credential=credential,
+        )
+        fee_invoice = FeeInvoice.objects.create(
+            landlord=credential.landlord, period_start=date.today(), period_end=date.today(), total_amount=100
+        )
+        both.fee_invoice = fee_invoice
+        with self.assertRaises(ValidationError):
+            both.clean()
+
+    def test_invoice_requires_landlord_credential(self):
+        credential, lease = _build_lease(shortcode="601200")
+        invoice = _build_invoice(lease)
+        missing_credential = STKPushRequest(
+            checkout_request_id="x3", phone_number="+254700000000", amount=100, invoice=invoice
+        )
+        with self.assertRaises(ValidationError):
+            missing_credential.clean()
+
+    def test_fee_invoice_forbids_landlord_credential(self):
+        credential, lease = _build_lease(shortcode="601300")
+        fee_invoice = FeeInvoice.objects.create(
+            landlord=credential.landlord, period_start=date.today(), period_end=date.today(), total_amount=100
+        )
+        extra_credential = STKPushRequest(
+            checkout_request_id="x4", phone_number="+254700000000", amount=100,
+            fee_invoice=fee_invoice, landlord_credential=credential,
+        )
+        with self.assertRaises(ValidationError):
+            extra_credential.clean()
+
 
 class WebhookViewTests(TestCase):
     def test_c2b_confirmation_rejects_malformed_json(self):
@@ -385,6 +593,85 @@ class BillingAPIAccessControlTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_502_BAD_GATEWAY)
 
 
+class BillingJSONAPITests(APITestCase):
+    """InvoiceViewSet/PaymentViewSet/FeeInvoiceViewSet — the JSON list/
+    detail API that didn't exist before (only PDF download + pay-initiation
+    did). Scoping reuses accounts.rbac.resolve_actor_scope."""
+
+    def setUp(self):
+        self.credential, self.lease = _build_lease(rent_amount=10000, shortcode="700100")
+        self.invoice = _build_invoice(self.lease, amount_due=10000)
+        self.payment = Payment.objects.create(
+            invoice=self.invoice, landlord_credential=self.credential, amount=10000,
+            mpesa_transaction_id="TXNJSONAPI",
+        )
+        self.fee_invoice = FeeInvoice.objects.create(
+            landlord=self.credential.landlord, period_start=date.today(), period_end=date.today(), total_amount=500
+        )
+        self.fee_ledger_entry = FeeLedgerEntry.objects.create(payment=self.payment, platform_fee_amount=500)
+        self.admin = User.objects.create_superuser(username="json-admin", password="x", role=Role.ADMIN)
+
+        other_org = Organization.objects.create(name="Other Org JSON")
+        other_landlord_user = User.objects.create_user(username="other-landlord-json", role=Role.LANDLORD)
+        self.other_landlord = Landlord.objects.create(
+            organization=other_org, user=other_landlord_user, full_name="Other Landlord JSON"
+        )
+
+    def test_admin_sees_all_invoices(self):
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        response = client.get("/api/billing/invoices/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = {row["id"] for row in response.data}
+        self.assertIn(str(self.invoice.id), ids)
+
+    def test_landlord_sees_only_their_own_invoices(self):
+        client = APIClient()
+        client.force_authenticate(user=self.credential.landlord.user)
+        response = client.get("/api/billing/invoices/")
+        ids = {row["id"] for row in response.data}
+        self.assertEqual(ids, {str(self.invoice.id)})
+
+    def test_unrelated_landlord_sees_no_invoices(self):
+        client = APIClient()
+        client.force_authenticate(user=self.other_landlord.user)
+        response = client.get("/api/billing/invoices/")
+        self.assertEqual(response.data, [])
+
+    def test_tenant_sees_only_their_own_payments(self):
+        client = APIClient()
+        client.force_authenticate(user=self.lease.tenant.user)
+        response = client.get("/api/billing/payments/")
+        ids = {row["id"] for row in response.data}
+        self.assertEqual(ids, {str(self.payment.id)})
+
+    def test_fee_invoices_scoped_to_landlord_not_tenant(self):
+        client = APIClient()
+        client.force_authenticate(user=self.lease.tenant.user)
+        response = client.get("/api/billing/fee-invoices/")
+        self.assertEqual(response.data, [])
+
+        client.force_authenticate(user=self.credential.landlord.user)
+        response = client.get("/api/billing/fee-invoices/")
+        ids = {row["id"] for row in response.data}
+        self.assertEqual(ids, {str(self.fee_invoice.id)})
+
+    def test_unauthenticated_request_rejected(self):
+        response = self.client.get("/api/billing/invoices/")
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_fee_ledger_entries_scoped_to_landlord(self):
+        client = APIClient()
+        client.force_authenticate(user=self.other_landlord.user)
+        response = client.get("/api/billing/fee-ledger-entries/")
+        self.assertEqual(response.data, [])
+
+        client.force_authenticate(user=self.credential.landlord.user)
+        response = client.get("/api/billing/fee-ledger-entries/")
+        ids = {row["id"] for row in response.data}
+        self.assertEqual(ids, {str(self.fee_ledger_entry.id)})
+
+
 class ReconciliationTests(TestCase):
     @patch("billing.tasks.DarajaClient.for_landlord")
     def test_reconcile_queries_recent_payments(self, mock_for_landlord):
@@ -402,3 +689,25 @@ class ReconciliationTests(TestCase):
         reconcile_landlord_transactions(str(credential.id))
 
         mock_client.query_transaction_status.assert_called_once_with("TXNRECON")
+
+
+class LogTransactionStatusResultTests(TestCase):
+    def test_mismatch_persists_audit_log_entry(self):
+        from audit.models import AuditLog
+        from .tasks import log_transaction_status_result
+
+        log_transaction_status_result({
+            "Result": {"ResultCode": 1, "ResultDesc": "Transaction not found", "TransactionID": "TXNMISMATCH"}
+        })
+
+        entry = AuditLog.objects.get(action="reconciliation_mismatch")
+        self.assertEqual(entry.target_object_id, "TXNMISMATCH")
+        self.assertEqual(entry.reason, "Transaction not found")
+
+    def test_match_does_not_persist_audit_log_entry(self):
+        from audit.models import AuditLog
+        from .tasks import log_transaction_status_result
+
+        log_transaction_status_result({"Result": {"ResultCode": 0, "ResultDesc": "OK"}})
+
+        self.assertFalse(AuditLog.objects.filter(action="reconciliation_mismatch").exists())

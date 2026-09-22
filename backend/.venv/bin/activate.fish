@@ -33,7 +33,7 @@ end
 # Unset irrelevant variables.
 deactivate nondestructive
 
-set -gx VIRTUAL_ENV /home/issa/luther/pms-m0-m1-scaffold/pms/backend/.venv
+set -gx VIRTUAL_ENV '/Users/eli/PMS -UI/PMS/backend/.venv'
 
 set -gx _OLD_VIRTUAL_PATH $PATH
 set -gx PATH "$VIRTUAL_ENV/"bin $PATH

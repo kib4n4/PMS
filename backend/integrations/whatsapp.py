@@ -36,6 +36,13 @@ class SendMessageResult:
     message_id: str
 
 
+@dataclass
+class StatusUpdate:
+    message_id: str
+    status: str  # Meta's own vocabulary: "sent" | "delivered" | "read" | "failed"
+    recipient_phone: str = ""
+
+
 class WhatsAppClient:
     def __init__(self, access_token: str, phone_number_id: str):
         self.access_token = access_token
@@ -138,3 +145,29 @@ class WhatsAppClient:
                     else:
                         logger.warning("Unrecognized WhatsApp message shape: %s", message)
         return messages
+
+    def parse_status_updates(self, payload: dict) -> list:
+        """
+        Extract delivery-status callbacks (Meta's `value.statuses` array —
+        sent/delivered/read/failed for a message THIS platform sent)
+        from the same webhook payload shape parse_inbound_webhook reads.
+        Kept as a separate method rather than folded into
+        parse_inbound_webhook so that method's return shape (a list of
+        InboundMessage) stays unchanged for existing callers/tests.
+        """
+        updates = []
+        for entry in payload.get("entry", []):
+            for change in entry.get("changes", []):
+                value = change.get("value", {})
+                for status_entry in value.get("statuses", []):
+                    message_id = status_entry.get("id", "")
+                    status_value = status_entry.get("status", "")
+                    if message_id and status_value:
+                        updates.append(
+                            StatusUpdate(
+                                message_id=message_id,
+                                status=status_value,
+                                recipient_phone=status_entry.get("recipient_id", ""),
+                            )
+                        )
+        return updates

@@ -5,10 +5,22 @@ from drf_spectacular.utils import OpenApiExample, extend_schema, inline_serializ
 from rest_framework import serializers, status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 
 from .models import PlatformApiClient
 from .tokens import CLIENT_CREDENTIALS_TOKEN_LIFETIME, issue_client_credentials_token
+
+
+class TokenEndpointThrottle(AnonRateThrottle):
+    """
+    Credential-exchange endpoints are a brute-force target — client_secret
+    guessing has no other rate limit anywhere in front of it (no nginx/WAF
+    in this repo). Scoped separately from the rest of the API so it
+    doesn't share a bucket with ordinary anonymous browsing.
+    """
+
+    scope = "oauth_token"
 
 _TokenRequestSerializer = inline_serializer(
     "TokenRequest",
@@ -35,6 +47,7 @@ class TokenView(APIView):
     """
 
     permission_classes = [AllowAny]
+    throttle_classes = [TokenEndpointThrottle]
 
     @extend_schema(
         summary="Exchange a customer key/secret for an access token",

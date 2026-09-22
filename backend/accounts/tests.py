@@ -4,6 +4,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth.hashers import make_password
+from django.contrib.auth.models import Group, Permission
+from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework import status
@@ -11,6 +13,7 @@ from rest_framework.test import APIClient, APITestCase
 
 from .models import OTPRequest, Role, User
 from .permissions import IsAdmin, IsLandlord, IsSelfOrAdmin, IsSuperAdmin, IsTenant
+from .signals import role_group_name
 
 
 def _make_user(**kwargs):
@@ -256,3 +259,82 @@ class LandlordTenantRoutePermissionTests(APITestCase):
         client.force_authenticate(user=tenant_user)
         response = client.get("/api/landlord/tenants/")
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class RoleGroupSyncTests(TestCase):
+    """accounts/signals.py:sync_role_group — Group membership must track
+    the `role` field, and only ADMIN role ever grants is_staff, never
+    strips it."""
+
+    def test_user_creation_assigns_role_group(self):
+        user = _make_user(username="rgs-landlord", role=Role.LANDLORD)
+        self.assertEqual(
+            list(user.groups.values_list("name", flat=True)), [role_group_name(Role.LANDLORD)]
+        )
+
+    def test_admin_role_grants_is_staff(self):
+        user = _make_user(username="rgs-admin", role=Role.ADMIN)
+        self.assertTrue(user.is_staff)
+
+    def test_non_admin_role_does_not_grant_is_staff(self):
+        user = _make_user(username="rgs-tenant", role=Role.TENANT)
+        self.assertFalse(user.is_staff)
+
+    def test_role_change_moves_user_between_groups(self):
+        user = _make_user(username="rgs-mover", role=Role.TENANT)
+        self.assertEqual(
+            list(user.groups.values_list("name", flat=True)), [role_group_name(Role.TENANT)]
+        )
+        user.role = Role.RESELLER
+        user.save()
+        self.assertEqual(
+            list(user.groups.values_list("name", flat=True)), [role_group_name(Role.RESELLER)]
+        )
+
+    def test_superuser_is_staff_is_never_downgraded(self):
+        user = User.objects.create_superuser(username="rgs-super", password="x", role=Role.TENANT)
+        self.assertTrue(user.is_staff)
+        user.save()
+        self.assertTrue(user.is_staff)
+
+
+class SyncRolePermissionsCommandTests(TestCase):
+    def test_command_is_idempotent(self):
+        call_command("sync_role_permissions")
+        first = set(
+            Group.objects.get(name=role_group_name(Role.ADMIN)).permissions.values_list("id", flat=True)
+        )
+        call_command("sync_role_permissions")
+        second = set(
+            Group.objects.get(name=role_group_name(Role.ADMIN)).permissions.values_list("id", flat=True)
+        )
+        self.assertEqual(first, second)
+        self.assertTrue(first)
+
+    def test_secret_bearing_models_get_no_permissions(self):
+        call_command("sync_role_permissions")
+        group = Group.objects.get(name=role_group_name(Role.ADMIN))
+        secret_apps_models = [
+            ("credentials", "platformcredential"),
+            ("landlords", "landlorddarajacredential"),
+            ("api_auth", "platformapiclient"),
+            ("taxes", "landlordkracredential"),
+        ]
+        for app_label, model_name in secret_apps_models:
+            has_any = group.permissions.filter(
+                content_type__app_label=app_label, content_type__model=model_name
+            ).exists()
+            self.assertFalse(has_any, f"{app_label}.{model_name} should have zero permissions granted")
+
+    def test_financial_records_get_no_delete_permission(self):
+        call_command("sync_role_permissions")
+        group = Group.objects.get(name=role_group_name(Role.ADMIN))
+        for app_label, model_name in [("billing", "payment"), ("billing", "feeledgerentry"), ("partners", "disbursement")]:
+            has_delete = group.permissions.filter(
+                content_type__app_label=app_label, content_type__model=model_name, codename__startswith="delete_"
+            ).exists()
+            self.assertFalse(has_delete, f"{app_label}.{model_name} should not have delete permission")
+            has_view = group.permissions.filter(
+                content_type__app_label=app_label, content_type__model=model_name, codename__startswith="view_"
+            ).exists()
+            self.assertTrue(has_view, f"{app_label}.{model_name} should still have view permission")

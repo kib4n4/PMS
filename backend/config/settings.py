@@ -45,6 +45,12 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://api.yourdomain.com"
 # Application definition
 
 INSTALLED_APPS = [
+    # Admin theme — must be listed before django.contrib.admin so it can
+    # override the built-in admin's templates. Plain/default Unfold config
+    # only (see UNFOLD below); no custom admin JS pages in this backend.
+    'unfold',
+    'unfold.contrib.filters',
+    'unfold.contrib.forms',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -86,6 +92,11 @@ REST_FRAMEWORK = {
         'rest_framework.authentication.SessionAuthentication',
     ],
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # 'oauth_token' scope used by api_auth.api_views.TokenEndpointThrottle —
+    # a credential-exchange endpoint with no other rate limit in front of it.
+    'DEFAULT_THROTTLE_RATES': {
+        'oauth_token': '10/min',
+    },
 }
 
 SPECTACULAR_SETTINGS = {
@@ -93,13 +104,29 @@ SPECTACULAR_SETTINGS = {
     'DESCRIPTION': (
         'Property management, payments, messaging, and tax-filing API for the Dime PMS platform. '
         'Internal endpoints under /api/ use JWT (user login); external-integrator endpoints under '
-        '/api/external/ use the OAuth2 client-credentials grant issued by POST /api/oauth/token/.'
+        '/api/external/ use the OAuth2 client-credentials grant issued by POST /api/oauth/token/ '
+        '(rate-limited; scopes are drawn from a fixed registry — see api_auth.models.Scope). '
+        'This documentation (/api/docs/, /api/redoc/, /api/schema/) is publicly readable without '
+        'authentication; the endpoints it describes are not.'
     ),
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
+    # Docs are intentionally public — see SPECTACULAR_SETTINGS['DESCRIPTION']
+    # above. This overrides the global IsAuthenticated default (REST_FRAMEWORK)
+    # for the schema/Swagger/Redoc views only.
+    'SERVE_PERMISSIONS': ['rest_framework.permissions.AllowAny'],
     # Webhooks (billing/messaging) are plain Django views, not DRF, so
     # they never appear here regardless of this setting — they speak
     # Safaricom/Meta's payload formats, not this platform's public API.
+    # Several unrelated models all name their status field "status" —
+    # without this, drf-spectacular can't always give each one's enum a
+    # distinct, readable schema component name.
+    'ENUM_NAME_OVERRIDES': {
+        'InvoiceStatusEnum': 'billing.models.InvoiceStatus',
+        'FeeInvoiceStatusEnum': 'billing.models.FeeInvoiceStatus',
+        'STKPushRequestStatusEnum': 'billing.models.STKPushRequestStatus',
+        'DisbursementStatusEnum': 'partners.models.DisbursementStatus',
+    },
 }
 
 SIMPLE_JWT = {
@@ -134,6 +161,12 @@ CORS_ALLOW_CREDENTIALS = False
 # credentials/fields.py the first time it's used.
 CREDENTIAL_ENCRYPTION_KEY = os.environ.get("CREDENTIAL_ENCRYPTION_KEY", "")
 
+# --- Billing --------------------------------------------------------------
+# Flat platform fee taken from every confirmed rent payment. Still a single
+# global rate (per-landlord rates are a documented Phase 4+ TODO in
+# billing/tasks.py) — env-overridable so it's no longer a literal in code.
+PLATFORM_FEE_RATE = os.environ.get("PLATFORM_FEE_RATE", "0.05")
+
 # Celery — broker/result backend point at Redis (see docker-compose.yml).
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
@@ -154,6 +187,10 @@ if 'test' in sys.argv:
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # Serves collected static files (incl. django-unfold's assets) directly
+    # from gunicorn — there's no nginx/static-file layer in front of this
+    # backend anywhere in the repo today.
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -242,3 +279,101 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
+
+
+# --- Admin UI (django-unfold) ---------------------------------------------
+# Grouped navigation, an emerald brand palette (reads as growth/money/trust
+# for a rent-and-fees platform — a deliberate swap for Unfold's stock
+# generic purple), no custom dashboard callback, no bespoke widgets. This
+# is the only admin surface in the backend; there are no separate
+# custom-built JS admin pages anywhere here.
+UNFOLD = {
+    "SITE_TITLE": "Dime PMS",
+    "SITE_HEADER": "Dime PMS",
+    "SITE_SYMBOL": "real_estate_agent",
+    "COLORS": {
+        # Tailwind's official "emerald" scale (oklch) — swapped in for
+        # Unfold's default violet primary. base/font stay Unfold's own
+        # neutral greys; only the brand color changes.
+        "primary": {
+            "50": "oklch(97.9% 0.021 166.113)",
+            "100": "oklch(95% 0.052 163.051)",
+            "200": "oklch(90.5% 0.093 164.15)",
+            "300": "oklch(84.5% 0.143 164.978)",
+            "400": "oklch(76.5% 0.177 163.223)",
+            "500": "oklch(69.6% 0.17 162.48)",
+            "600": "oklch(59.6% 0.145 163.225)",
+            "700": "oklch(50.8% 0.118 165.612)",
+            "800": "oklch(43.2% 0.095 166.913)",
+            "900": "oklch(37.8% 0.077 168.94)",
+            "950": "oklch(26.2% 0.051 172.552)",
+        },
+    },
+    "SHOW_HISTORY": True,
+    "SHOW_VIEW_ON_SITE": False,
+    "SIDEBAR": {
+        "show_search": True,
+        "show_all_applications": False,
+        "navigation": [
+            {
+                "title": "Operations",
+                "items": [
+                    {"title": "Organizations", "icon": "corporate_fare", "link": "/admin/landlords/organization/"},
+                    {"title": "Landlords", "icon": "badge", "link": "/admin/landlords/landlord/"},
+                    {"title": "Daraja credentials", "icon": "key", "link": "/admin/landlords/landlorddarajacredential/"},
+                    {"title": "Properties", "icon": "apartment", "link": "/admin/properties/property/"},
+                    {"title": "Units", "icon": "door_front", "link": "/admin/properties/unit/"},
+                    {"title": "Tenants", "icon": "person", "link": "/admin/leasing/tenant/"},
+                    {"title": "Leases", "icon": "description", "link": "/admin/leasing/lease/"},
+                    {"title": "Caretakers", "icon": "engineering", "link": "/admin/caretakers/caretaker/"},
+                    {"title": "Maintenance tickets", "icon": "build", "link": "/admin/maintenance/maintenanceticket/"},
+                ],
+            },
+            {
+                "title": "Money",
+                "items": [
+                    {"title": "Invoices", "icon": "receipt_long", "link": "/admin/billing/invoice/"},
+                    {"title": "Payments", "icon": "payments", "link": "/admin/billing/payment/"},
+                    {"title": "Fee ledger", "icon": "account_balance", "link": "/admin/billing/feeledgerentry/"},
+                    {"title": "Fee invoices", "icon": "request_quote", "link": "/admin/billing/feeinvoice/"},
+                    {"title": "Resellers", "icon": "groups", "link": "/admin/partners/reseller/"},
+                    {"title": "Investors", "icon": "trending_up", "link": "/admin/partners/investor/"},
+                    {"title": "Disbursements", "icon": "outbound", "link": "/admin/partners/disbursement/"},
+                    {"title": "Tax filings", "icon": "fact_check", "link": "/admin/taxes/rentalincomereturn/"},
+                ],
+            },
+            {
+                "title": "Messaging",
+                "items": [
+                    {"title": "Templates", "icon": "quickreply", "link": "/admin/messaging/notificationtemplate/"},
+                    {"title": "WhatsApp messages", "icon": "forum", "link": "/admin/messaging/whatsappmessage/"},
+                    {"title": "Email messages", "icon": "mail", "link": "/admin/messaging/emailmessage/"},
+                ],
+            },
+            {
+                "title": "Platform",
+                "items": [
+                    {"title": "Users", "icon": "manage_accounts", "link": "/admin/accounts/user/"},
+                    {"title": "Platform credentials", "icon": "vpn_key", "link": "/admin/credentials/platformcredential/"},
+                    {"title": "API clients", "icon": "api", "link": "/admin/api_auth/platformapiclient/"},
+                    {"title": "Audit log", "icon": "history", "link": "/admin/audit/auditlog/"},
+                    {
+                        "title": "API docs (public)",
+                        "icon": "menu_book",
+                        "link": "/api/docs/",
+                    },
+                ],
+            },
+        ],
+    },
+}

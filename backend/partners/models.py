@@ -3,7 +3,9 @@
 import uuid
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils import timezone
 
 
 class PayoutAccount(models.Model):
@@ -65,6 +67,24 @@ class ReferralCommissionRule(models.Model):
 
     def __str__(self):
         return f"{self.reseller.full_name} earns {self.rate_percent}% on {self.landlord.full_name}"
+
+    def _is_currently_active(self) -> bool:
+        return self.is_perpetual or bool(self.expires_at and self.expires_at > timezone.now())
+
+    def clean(self):
+        super().clean()
+        if not self._is_currently_active():
+            return
+        conflicting = ReferralCommissionRule.objects.filter(reseller=self.reseller, landlord_id=self.landlord_id)
+        if self.pk:
+            conflicting = conflicting.exclude(pk=self.pk)
+        for other in conflicting:
+            if other._is_currently_active():
+                raise ValidationError(
+                    "This reseller already has an active commission rule for this landlord "
+                    f"(rule {other.pk}). billing/tasks.py picks one arbitrarily via .first() "
+                    "when duplicates exist — expire or delete the old rule first."
+                )
 
 
 class Investor(models.Model):
@@ -157,3 +177,12 @@ class Disbursement(models.Model):
     def __str__(self):
         who = self.reseller or self.investor
         return f"Disbursement {self.amount} to {who} ({self.status})"
+
+    def clean(self):
+        super().clean()
+        if self.recipient_type == DisbursementRecipientType.RESELLER:
+            if not self.reseller_id or self.investor_id:
+                raise ValidationError("recipient_type=reseller requires reseller set and investor blank.")
+        elif self.recipient_type == DisbursementRecipientType.INVESTOR:
+            if not self.investor_id or self.reseller_id:
+                raise ValidationError("recipient_type=investor requires investor set and reseller blank.")

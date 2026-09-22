@@ -12,7 +12,7 @@ from credentials.models import PlatformCredentialKey
 from credentials.services import get_platform_credential
 from integrations.whatsapp import WhatsAppClient
 
-from .tasks import handle_inbound_whatsapp_message
+from .tasks import handle_inbound_whatsapp_message, handle_whatsapp_status_update
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,12 @@ def _handle_inbound(request):
         logger.warning("whatsapp_webhook: non-JSON body")
         return JsonResponse({"status": "ignored"})
 
-    for message in WhatsAppClient.default().parse_inbound_webhook(payload):
+    client = WhatsAppClient.default()
+
+    for message in client.parse_inbound_webhook(payload):
         handle_inbound_whatsapp_message.delay(message.phone_number, message.body, message.message_id)
+
+    for status_update in client.parse_status_updates(payload):
+        handle_whatsapp_status_update.delay(status_update.message_id, status_update.status)
 
     return JsonResponse({"status": "received"})

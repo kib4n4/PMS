@@ -3,6 +3,7 @@
 import logging
 from typing import Optional
 
+from accounts.phone import normalize_msisdn
 from billing.models import Invoice, InvoiceStatus
 from billing.services import (
     InvoiceAlreadyPaidError,
@@ -30,8 +31,28 @@ class NoOpenInvoiceError(Exception):
     pass
 
 
+class TemplateNotApprovedError(Exception):
+    """No APPROVED NotificationTemplate exists for the requested name."""
+
+
+def resolve_approved_template(name: str):
+    from .models import NotificationTemplate, TemplateApprovalStatus
+
+    template = (
+        NotificationTemplate.objects.filter(name=name, approval_status=TemplateApprovalStatus.APPROVED)
+        .order_by("-version")
+        .first()
+    )
+    if template is None:
+        raise TemplateNotApprovedError(f"No approved NotificationTemplate named '{name}'.")
+    return template
+
+
 def find_tenant_by_phone(phone_number: str):
-    return Tenant.objects.select_related("user").filter(user__phone_number=phone_number).first()
+    # Meta's webhook sends bare-digit MSISDNs ("254711...", no "+"), but
+    # User.phone_number is stored E.164 ("+254711...") — without this,
+    # every inbound WhatsApp message from a real tenant fails to match.
+    return Tenant.objects.select_related("user").filter(user__phone_number=normalize_msisdn(phone_number)).first()
 
 
 def find_active_lease_for_tenant(tenant: Tenant) -> Optional[Lease]:

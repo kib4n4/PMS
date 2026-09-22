@@ -13,7 +13,21 @@ import secrets
 import uuid
 
 from django.contrib.auth.hashers import check_password, make_password
+from django.core.exceptions import ValidationError
 from django.db import models
+
+
+class Scope(models.TextChoices):
+    """
+    Fixed registry of scope strings a `PlatformApiClient` may be granted.
+    Before this existed, `scopes` was unvalidated free-text JSON — a typo
+    here silently produced a client that could never be authorized for
+    anything. Extend this list (not the raw string) when a new external
+    endpoint needs a new scope.
+    """
+
+    INVOICES_READ = "invoices:read", "Read landlord invoices"
+    PAYMENTS_READ = "payments:read", "Read landlord payments"
 
 
 class PlatformApiClient(models.Model):
@@ -37,24 +51,48 @@ class PlatformApiClient(models.Model):
     def __str__(self):
         return f"{self.name} ({self.client_id})"
 
+    @staticmethod
+    def _validate_scopes(scopes):
+        unknown = sorted(set(scopes) - set(Scope.values))
+        if unknown:
+            raise ValidationError(f"Unknown scope(s): {', '.join(unknown)}. Valid scopes: {', '.join(Scope.values)}.")
+
+    def clean(self):
+        super().clean()
+        self._validate_scopes(self.scopes or [])
+
     @classmethod
     def generate(cls, name: str, scopes=None, landlord=None):
         """
         Creates a new client and returns (instance, plaintext_secret).
         The plaintext secret is only ever available here, at creation
-        time — it's hashed immediately and cannot be recovered later,
-        only rotated (delete + regenerate).
+        time — it's hashed immediately and cannot be recovered later;
+        use `rotate_secret()` to issue a new one for an existing client.
         """
+        scopes = scopes or []
+        cls._validate_scopes(scopes)
         client_id = f"pms_{secrets.token_hex(8)}"
         plaintext_secret = secrets.token_urlsafe(32)
         instance = cls.objects.create(
             name=name,
             client_id=client_id,
             client_secret_hash=make_password(plaintext_secret),
-            scopes=scopes or [],
+            scopes=scopes,
             landlord=landlord,
         )
         return instance, plaintext_secret
+
+    def rotate_secret(self) -> str:
+        """
+        Issues a new plaintext secret for this client without touching its
+        client_id/scopes/landlord binding or audit history. The old secret
+        stops working immediately. Returns the new plaintext secret — like
+        `generate()`, it is only ever available here, at rotation time.
+        """
+        plaintext_secret = secrets.token_urlsafe(32)
+        self.client_secret_hash = make_password(plaintext_secret)
+        self.save(update_fields=["client_secret_hash"])
+        return plaintext_secret
 
     def verify_secret(self, plaintext_secret: str) -> bool:
         return check_password(plaintext_secret, self.client_secret_hash)

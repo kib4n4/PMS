@@ -1,20 +1,27 @@
 # backend/messaging/tasks.py
 
 import logging
+from datetime import timedelta
 
 from celery import shared_task
+from django.utils import timezone
 
 from integrations.resend_client import ResendClient, ResendError
 from integrations.whatsapp import WhatsAppClient, WhatsAppError
 
 from . import services
-from .models import EmailMessage, MessageDirection, WhatsAppMessage
+from .models import EmailMessage, MessageDirection, WhatsAppDeliveryStatus, WhatsAppMessage
 
 logger = logging.getLogger(__name__)
 
 REPORT_ISSUE_TRIGGERS = ("report issue", "report_issue", "issue", "2")
 BALANCE_TRIGGERS = {"balance", "my balance", "3"}
 CARETAKER_TRIGGERS = {"caretaker", "talk to caretaker", "4"}
+
+_MENU_REPLY = (
+    "Sorry, I didn't understand that. Reply with one of: "
+    "'Pay Rent', 'Balance', 'Caretaker', or 'Report issue: <description>'."
+)
 
 _PAY_RENT_OUTCOME_MESSAGES = {
     "unknown_tenant": "We couldn't find your tenant record — please contact your caretaker.",
@@ -30,7 +37,9 @@ def send_whatsapp_reply(phone_number: str, body: str, related_object_type: str =
     Every outbound WhatsApp reply goes through here: write the audit
     record first (so we always have a trail even if the send itself
     fails), then attempt real delivery via the Cloud API and update the
-    record's delivery_status with the outcome.
+    record's delivery_status with the outcome. Free-form session message
+    only — works within Meta's 24h customer-initiated window; use
+    send_whatsapp_template for anything outside that window.
     """
     message = WhatsAppMessage.objects.create(
         direction=MessageDirection.OUTBOUND,
@@ -40,13 +49,71 @@ def send_whatsapp_reply(phone_number: str, body: str, related_object_type: str =
         related_object_id=related_object_id,
     )
     try:
-        WhatsAppClient.default().send_session_message(phone_number, body)
+        result = WhatsAppClient.default().send_session_message(phone_number, body)
     except WhatsAppError:
         logger.exception("Failed to send WhatsApp reply to %s", phone_number)
-        message.delivery_status = "failed"
-    else:
-        message.delivery_status = "sent"
-    message.save(update_fields=["delivery_status"])
+        message.delivery_status = WhatsAppDeliveryStatus.FAILED
+        message.save(update_fields=["delivery_status"])
+        return message
+    message.delivery_status = WhatsAppDeliveryStatus.SENT
+    message.meta_message_id = str(result.message_id)
+    message.save(update_fields=["delivery_status", "meta_message_id"])
+    return message
+
+
+def send_whatsapp_template(
+    phone_number: str, template_name: str, variables: dict, *, related_object_type: str = "", related_object_id: str = ""
+):
+    """
+    Sends a pre-approved WhatsApp template message — unlike
+    send_whatsapp_reply, works outside Meta's 24h session window, and
+    (unlike every other send path today) actually sets
+    WhatsAppMessage.template_used, which existed from day one but nothing
+    ever populated. Raises services.TemplateNotApprovedError if no
+    APPROVED version of `template_name` exists — callers decide whether
+    that's fatal or skippable (see send_rent_reminders below).
+    """
+    template = services.resolve_approved_template(template_name)
+    rendered_body = template.body
+    for key, value in variables.items():
+        rendered_body = rendered_body.replace(f"{{{{{key}}}}}", str(value))
+
+    message = WhatsAppMessage.objects.create(
+        direction=MessageDirection.OUTBOUND,
+        phone_number=phone_number,
+        template_used=template,
+        body=rendered_body,
+        related_object_type=related_object_type,
+        related_object_id=related_object_id,
+    )
+    try:
+        result = WhatsAppClient.default().send_template_message(phone_number, template.name, variables)
+    except WhatsAppError:
+        logger.exception("Failed to send WhatsApp template %s to %s", template_name, phone_number)
+        message.delivery_status = WhatsAppDeliveryStatus.FAILED
+        message.save(update_fields=["delivery_status"])
+        return message
+    message.delivery_status = WhatsAppDeliveryStatus.SENT
+    message.meta_message_id = str(result.message_id)
+    message.save(update_fields=["delivery_status", "meta_message_id"])
+    return message
+
+
+@shared_task
+def handle_whatsapp_status_update(message_id: str, status_value: str):
+    """
+    Meta's delivery-status webhook callback. Previously delivery_status
+    was only ever set locally, once, at send time, based on whether our
+    own HTTP call to Meta succeeded — never updated to reflect what
+    actually happened on the wire (delivered/read/failed-per-Meta).
+    """
+    if status_value not in WhatsAppDeliveryStatus.values:
+        logger.warning("handle_whatsapp_status_update: unrecognized status %r for %s", status_value, message_id)
+        return
+
+    updated = WhatsAppMessage.objects.filter(meta_message_id=message_id).update(delivery_status=status_value)
+    if not updated:
+        logger.info("handle_whatsapp_status_update: no message found for meta_message_id=%s", message_id)
 
 
 @shared_task
@@ -83,6 +150,7 @@ def handle_inbound_whatsapp_message(phone_number: str, body: str, message_id: st
             return _handle_report_issue(phone_number, body, trigger, message_id)
 
     logger.info("Unclassified WhatsApp message from %s: %r", phone_number, body)
+    send_whatsapp_reply(phone_number, _MENU_REPLY)
     return {"ok": False, "reason": "unclassified_intent"}
 
 
@@ -161,6 +229,61 @@ def _handle_report_issue(phone_number: str, raw_body: str, matched_trigger: str,
         related_object_id=str(ticket.id),
     )
     return {"ok": True, "ticket_id": str(ticket.id)}
+
+
+@shared_task
+def send_rent_reminders(days_before_due: int = 3):
+    """
+    Proactive outbound flow — previously nothing sent a rent reminder at
+    all; NotificationTemplate existed but nothing used it (see
+    send_whatsapp_template). Sends one 'rent_reminder' template message
+    per still-open invoice due within `days_before_due` days (or already
+    overdue), skipping an invoice already reminded today so a retry of
+    this task (or a shorter Beat interval) can't spam a tenant.
+    """
+    from billing.models import Invoice, InvoiceStatus
+
+    today = timezone.now().date()
+    cutoff = today + timedelta(days=days_before_due)
+    due_invoices = Invoice.objects.filter(
+        status__in=[InvoiceStatus.OPEN, InvoiceStatus.PARTIAL, InvoiceStatus.OVERDUE],
+        due_date__lte=cutoff,
+    ).select_related("lease__tenant__user")
+
+    sent = 0
+    for invoice in due_invoices:
+        phone_number = invoice.lease.tenant.user.phone_number
+        if not phone_number:
+            continue
+
+        already_reminded_today = WhatsAppMessage.objects.filter(
+            direction=MessageDirection.OUTBOUND,
+            related_object_type="Invoice",
+            related_object_id=str(invoice.id),
+            created_at__date=today,
+        ).exists()
+        if already_reminded_today:
+            continue
+
+        try:
+            send_whatsapp_template(
+                phone_number,
+                "rent_reminder",
+                {
+                    "tenant_name": invoice.lease.tenant.full_name,
+                    "amount_due": str(invoice.amount_due - invoice.amount_paid),
+                    "due_date": str(invoice.due_date),
+                },
+                related_object_type="Invoice",
+                related_object_id=str(invoice.id),
+            )
+            sent += 1
+        except services.TemplateNotApprovedError:
+            logger.warning("send_rent_reminders: no approved 'rent_reminder' template — skipping this run.")
+            break
+
+    logger.info("send_rent_reminders: sent %s reminder(s)", sent)
+    return sent
 
 
 @shared_task
