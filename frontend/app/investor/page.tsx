@@ -1,182 +1,192 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
+import { formatKES, formatPercent } from "@/lib/format";
+import { useDashboardData } from "@/lib/use-dashboard-data";
 
 import DashboardLayout from "@/components/DashboardLayout";
+import { DashboardLoading, DashboardError } from "@/components/DashboardState";
 import KPICard from "@/components/KPICard";
 import ChartCard from "@/components/ChartCard";
 import DashedRule from "@/components/DashedRule";
 import DataTable from "@/components/DataTable";
-import {
-  TrendingUpIcon,
-  DollarSignIcon,
-  PieChartIcon,
-  ClockIcon,
-  CheckCircleIcon,
-} from "@/components/Icons";
+import { TrendingUpIcon, DollarSignIcon, PieChartIcon, ClockIcon, CheckCircleIcon, XCircleIcon } from "@/components/Icons";
 
-const kpis = [
-  {
-    title: "Revenue Share",
-    value: "KES 156K",
-    subtitle: "Portfolio-wide",
-    trend: { value: 18.2, label: "vs last quarter" },
-    accent: "emerald" as const,
-    icon: <TrendingUpIcon className="h-6 w-6" />,
-  },
-  {
-    title: "Pending Payout",
-    value: "KES 45K",
-    subtitle: "Next disbursement in 5 days",
-    trend: { value: 5.6, label: "vs last quarter" },
-    accent: "amber" as const,
-    icon: <DollarSignIcon className="h-6 w-6" />,
-  },
-  {
-    title: "Active Agreements",
-    value: 3,
-    subtitle: "2 portfolio-wide, 1 org-specific",
-    trend: { value: 0, label: "unchanged" },
-    accent: "blue" as const,
-    icon: <PieChartIcon className="h-6 w-6" />,
-  },
-  {
-    title: "Next Disbursement",
-    value: "Aug 31",
-    subtitle: "KES 45K scheduled",
-    trend: { value: 0, label: "on track" },
-    accent: "blue" as const,
-    icon: <ClockIcon className="h-6 w-6" />,
-  },
-];
+type Agreement = {
+  id: string;
+  scope: string;
+  basis: string;
+  ratePercent: number;
+  cadence: string;
+  start: string;
+  end: string | null;
+  active: boolean;
+};
+type DisbursementRow = { date: string; amount: number; status: string; txnId: string };
+type RevenuePoint = { month: string; amount: number };
 
-const agreements = [
-  { investor: "Alice Muthoni", basis: "Net Profit", rate: "5%", scope: "Portfolio-wide", cadence: "Monthly", start: "2026-01-01", end: "2027-01-01" },
-  { investor: "Alice Muthoni", basis: "Gross Fee Revenue", rate: "3%", scope: "Dime Consultants", cadence: "Quarterly", start: "2026-01-01", end: null },
-  { investor: "Bob Ochieng", basis: "Net Profit", rate: "8%", scope: "Portfolio-wide", cadence: "Monthly", start: "2025-06-01", end: "2026-06-01" },
-];
+type InvestorDashboardData = {
+  kpis: { revenueShare: number; pendingPayout: number; activeAgreements: number; avgRate: number };
+  agreements: Agreement[];
+  disbursements: DisbursementRow[];
+  monthlyRevenue: RevenuePoint[];
+};
 
-const disbursements = [
-  { date: "2026-07-31", amount: "KES 42K", status: "Confirmed", txnId: "TXN-DISB-001", recipient: "Alice Muthoni" },
-  { date: "2026-06-30", amount: "KES 38K", status: "Confirmed", txnId: "TXN-DISB-002", recipient: "Alice Muthoni" },
-  { date: "2026-05-31", amount: "KES 35K", status: "Confirmed", txnId: "TXN-DISB-003", recipient: "Alice Muthoni" },
-  { date: "2026-04-30", amount: "KES 31K", status: "Confirmed", txnId: "TXN-DISB-004", recipient: "Alice Muthoni" },
-];
-
-const quarterlyRevenue = [
-  { quarter: "Q1 2025", amount: 85 },
-  { quarter: "Q2 2025", amount: 102 },
-  { quarter: "Q3 2025", amount: 118 },
-  { quarter: "Q4 2025", amount: 134 },
-  { quarter: "Q1 2026", amount: 145 },
-  { quarter: "Q2 2026", amount: 156 },
-];
+const statusPill: Record<string, string> = {
+  confirmed: "bg-teal-100 text-teal-800",
+  sent: "bg-amber-100 text-amber-800",
+  pending: "bg-amber-100 text-amber-800",
+  failed: "bg-rust-100 text-rust-800",
+};
 
 export default function InvestorDashboard() {
+  const { data, isLoading, error } = useDashboardData<InvestorDashboardData>("/api/dashboard/investor");
+
   return (
     <DashboardLayout>
       <div className="space-y-6">
         <div>
-          <h1 className="text-2xl font-bold text-ink-900">Investor Dashboard</h1>
+          <h1 className="font-serif text-[28px] font-medium text-ink-900">Investor Dashboard</h1>
           <p className="mt-1 text-sm text-ink-600">Revenue share, agreements, and payout tracking.</p>
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {kpis.map((kpi) => (
-            <KPICard key={kpi.title} {...kpi} />
-          ))}
-        </div>
-
-        <DashedRule />
-
-        <div className="grid gap-6 lg:grid-cols-3">
-          <ChartCard title="Revenue Share Trend" description="Quarterly earnings (KES thousands)" className="lg:col-span-2">
-            <RevenueChart data={quarterlyRevenue} />
-          </ChartCard>
-          <ChartCard title="Agreement Summary">
-            <div className="space-y-4">
-              <div className="flex items-center justify-between rounded-lg bg-mist-50 p-4">
-                <div>
-                  <p className="text-sm font-medium text-ink-900">Portfolio-wide</p>
-                  <p className="text-xs text-ink-600">Net Profit 5%</p>
-                </div>
-                <span className="text-sm font-semibold text-teal-600">Active</span>
-              </div>
-              <div className="flex items-center justify-between rounded-lg bg-mist-50 p-4">
-                <div>
-                  <p className="text-sm font-medium text-ink-900">Dime Consultants</p>
-                  <p className="text-xs text-ink-600">Gross Fee 3%, Quarterly</p>
-                </div>
-                <span className="text-sm font-semibold text-teal-600">Active</span>
-              </div>
-              <div className="flex items-center justify-between rounded-lg bg-mist-50 p-4">
-                <div>
-                  <p className="text-sm font-medium text-ink-900">Expired Agreement</p>
-                  <p className="text-xs text-ink-600">Ended 2026-06-01</p>
-                </div>
-                <span className="text-sm font-semibold text-ink-500">Ended</span>
-              </div>
-            </div>
-          </ChartCard>
-        </div>
-
-        <DashedRule />
-
-        <div className="grid gap-6 lg:grid-cols-2">
-          <ChartCard title="Active Agreements">
-            <DataTable
-              columns={[
-                { key: "investor", header: "Investor" },
-                { key: "basis", header: "Basis" },
-                { key: "rate", header: "Rate" },
-                { key: "scope", header: "Scope" },
-                { key: "cadence", header: "Cadence" },
-                { key: "start", header: "Start" },
-              ]}
-              data={agreements}
-            />
-          </ChartCard>
-
-          <ChartCard title="Disbursement History">
-            <DataTable
-              columns={[
-                { key: "date", header: "Date" },
-                { key: "recipient", header: "Recipient" },
-                { key: "amount", header: "Amount" },
-                {
-                  key: "status",
-                  header: "Status",
-                  render: (row: typeof disbursements[0]) => (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-teal-100 px-2 py-0.5 text-xs font-medium text-teal-800">
-                      <CheckCircleIcon className="h-3 w-3" />
-                      {row.status}
-                    </span>
-                  ),
-                },
-                { key: "txnId", header: "Txn ID" },
-              ]}
-              data={disbursements}
-            />
-          </ChartCard>
-        </div>
+        {isLoading && <DashboardLoading />}
+        {error && <DashboardError message={error} />}
+        {data && <InvestorDashboardBody data={data} />}
       </div>
     </DashboardLayout>
   );
 }
 
-function RevenueChart({ data }: { data: { quarter: string; amount: number }[] }) {
-  const max = Math.max(...data.map((d) => d.amount));
+function InvestorDashboardBody({ data }: { data: InvestorDashboardData }) {
+  return (
+    <>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+        <div className="sm:col-span-2">
+          <KPICard
+            variant="hero"
+            title="Revenue share"
+            value={formatKES(data.kpis.revenueShare)}
+            subtitle="Confirmed payouts to date"
+            accent="emerald"
+            icon={<TrendingUpIcon className="h-6 w-6" />}
+          />
+        </div>
+        <KPICard title="Pending payout" value={formatKES(data.kpis.pendingPayout)} accent="amber" icon={<DollarSignIcon className="h-6 w-6" />} />
+        <KPICard title="Active agreements" value={data.kpis.activeAgreements} accent="blue" icon={<PieChartIcon className="h-6 w-6" />} />
+        <KPICard
+          title="Avg share rate"
+          value={formatPercent(data.kpis.avgRate)}
+          subtitle="Active agreements"
+          accent="blue"
+          icon={<ClockIcon className="h-6 w-6" />}
+        />
+      </div>
+
+      <DashedRule />
+
+      <div className="grid gap-6 lg:grid-cols-3">
+        <ChartCard title="Revenue Share Trend" description="Monthly confirmed + pending disbursements" className="lg:col-span-2">
+          <RevenueChart data={data.monthlyRevenue} />
+        </ChartCard>
+        <ChartCard title="Agreement Summary">
+          {data.agreements.length === 0 ? (
+            <p className="text-sm text-ink-500">No revenue-share agreements yet.</p>
+          ) : (
+            <div className="divide-y divide-dashed divide-border">
+              {data.agreements.map((a) => (
+                <div key={a.id} className="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-ink-900">{a.scope}</p>
+                    <p className="text-xs text-ink-600">
+                      {a.basis} · {formatPercent(a.ratePercent)} · {a.cadence}
+                    </p>
+                  </div>
+                  <span
+                    className={cn(
+                      "shrink-0 text-xs font-medium",
+                      a.active ? "text-teal-700" : "text-ink-400",
+                    )}
+                  >
+                    {a.active ? "Active" : "Ended"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </ChartCard>
+      </div>
+
+      <DashedRule />
+
+      <div className="grid gap-6 lg:grid-cols-2">
+        <ChartCard title="Active Agreements">
+          <DataTable
+            columns={[
+              { key: "scope", header: "Scope" },
+              { key: "basis", header: "Basis" },
+              { key: "ratePercent", header: "Rate", render: (row: Agreement) => formatPercent(row.ratePercent) },
+              { key: "cadence", header: "Cadence" },
+              { key: "start", header: "Start" },
+            ]}
+            data={data.agreements}
+            empty={<p className="text-sm">No agreements yet.</p>}
+          />
+        </ChartCard>
+
+        <ChartCard title="Disbursement History">
+          <DataTable
+            columns={[
+              { key: "date", header: "Date" },
+              { key: "amount", header: "Amount", render: (row: DisbursementRow) => formatKES(row.amount) },
+              {
+                key: "status",
+                header: "Status",
+                render: (row: DisbursementRow) => (
+                  <span
+                    className={cn(
+                      "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium capitalize",
+                      statusPill[row.status] ?? "bg-mist-100/70 text-ink-700"
+                    )}
+                  >
+                    {row.status === "confirmed" && <CheckCircleIcon className="h-3 w-3" />}
+                    {row.status === "failed" && <XCircleIcon className="h-3 w-3" />}
+                    {row.status}
+                  </span>
+                ),
+              },
+              { key: "txnId", header: "Txn ID" },
+            ]}
+            data={data.disbursements}
+            empty={<p className="text-sm">No disbursements yet.</p>}
+          />
+        </ChartCard>
+      </div>
+    </>
+  );
+}
+
+function RevenueChart({ data }: { data: { month: string; amount: number }[] }) {
+  // One deliberate motion moment for this view: bars grow on mount.
+  const [grown, setGrown] = useState(false);
+  useEffect(() => {
+    const t = requestAnimationFrame(() => setGrown(true));
+    return () => cancelAnimationFrame(t);
+  }, []);
+  const max = Math.max(1, ...data.map((d) => d.amount));
+
   return (
     <div className="h-64 w-full">
       <div className="flex h-full items-end gap-2">
         {data.map((d) => (
-          <div key={d.quarter} className="flex flex-1 flex-col items-center gap-1">
+          <div key={d.month} className="flex flex-1 flex-col items-center gap-1">
             <div
-              className="w-full rounded-t bg-teal-500 transition-all hover:bg-teal-600"
-              style={{ height: `${(d.amount / max) * 100}%` }}
-              title={`KES ${d.amount}K`}
+              className="w-full rounded-t bg-teal-600 transition-[height] duration-700 ease-out hover:bg-teal-700"
+              style={{ height: grown ? `${(d.amount / max) * 100}%` : "0%", minHeight: grown && d.amount > 0 ? "2px" : "0" }}
+              title={formatKES(d.amount)}
             />
-            <span className="text-xs text-ink-500">{d.quarter}</span>
+            <span className="text-xs text-ink-500">{d.month}</span>
           </div>
         ))}
       </div>

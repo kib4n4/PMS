@@ -1,106 +1,148 @@
-import { ReactNode } from "react";
+// Ledger icon set — one shared grammar: rubber-stamp seals for status,
+// ledger tally marks for counts/growth. Deliberately not an
+// outline-icon-library swap; every shape below is drawn to mean
+// something specific to a ledger/property/M-Pesa product. Exported
+// names and the { className } prop are preserved exactly — only the
+// markup inside each component changed.
 
 export function BuildingIcon({ className }: { className?: string }) {
+  // A single gabled roofline over a base rule — "property," grounded.
   return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 21h19.5m-18-18v18m10.5-18v18m6-13.5V21M6.75 17.25h.008v.008H6.75v-.008zm0-3h.008v.008H6.75V14.25zm0-3h.008v.008H6.75v-.008zm0-3h.008v.008H6.75V8.25zm9 9h.008v.008H15.75v-.008zm0-3h.008v.008H15.75V14.25zm0-3h.008v.008H15.75v-.008zm0-3h.008v.008H15.75V8.25zm3.75 9h.008v.008H19.5v-.008zm0-3h.008v.008H19.5V14.25zm0-3h.008v.008H19.5v-.008zM4.5 19.5h15a2.25 2.25 0 002.25-2.25V6a2.25 2.25 0 00-2.25-2.25H4.5A2.25 2.25 0 002.25 6v11.25A2.25 2.25 0 004.5 19.5z" />
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4 20h16" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6 20V10.5L12 6l6 4.5V20" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M10 20v-5h4v5" />
     </svg>
   );
 }
 
 export function UsersIcon({ className }: { className?: string }) {
+  // Headcount as a ledger tally, not a person silhouette.
   return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M15 19.128a9.001 9.001 0 001.424-4.95m-9.05-4.95a9.001 9.001 0 011.424-4.95M15 19.128v.003a9.001 9.001 0 01-2.424.003m2.424-.003a9.001 9.001 0 012.424-.003M9 19.128v.003a9.001 9.001 0 01-2.424.003m2.424-.003a9.001 9.001 0 012.424-.003M9 19.128a9.001 9.001 0 01-1.424-4.95m9.05 4.95a9.001 9.001 0 01-1.424-4.95m-9.05 4.95a9.001 9.001 0 00-1.424 4.95m9.05-4.95a9.001 9.001 0 00-1.424 4.95M12 12.75a3.75 3.75 0 100-7.5 3.75 3.75 0 000 7.5z" />
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <path strokeLinecap="round" d="M4 18h16" />
+      <path strokeLinecap="round" d="M6.5 18V10M12 18V6.5M17.5 18V12" />
     </svg>
   );
 }
 
 export function TrendingUpIcon({ className }: { className?: string }) {
+  // Ascending tally bars — growth and a ledger column at once.
   return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 18L9 11.25l4.306 4.307a11.95 11.95 0 015.814-5.519l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941" />
+    <svg className={className} viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <rect x="5" y="13" width="3.1" height="5.5" rx="0.6" />
+      <rect x="10.45" y="9" width="3.1" height="9.5" rx="0.6" />
+      <rect x="15.9" y="5" width="3.1" height="13.5" rx="0.6" />
     </svg>
   );
 }
 
 export function WrenchIcon({ className }: { className?: string }) {
+  // Wrench with a verification tick — repair, then confirmed.
   return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M11.42 15.17l-5.108-5.108a2.25 2.25 0 01-.586-1.591V6.75a2.25 2.25 0 012.25-2.25h2.344a2.25 2.25 0 011.591.586l5.108 5.108m-1.591 1.591l-5.108 5.108a2.25 2.25 0 01-1.591.586H6.75a2.25 2.25 0 01-2.25-2.25v-2.344a2.25 2.25 0 01.586-1.591l5.108-5.108m1.591 1.591l5.108 5.108a2.25 2.25 0 01.586 1.591V18a2.25 2.25 0 01-2.25 2.25h-2.344a2.25 2.25 0 01-1.591-.586l-5.108-5.108m1.591-1.591l5.108-5.108" />
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M14.7 5.8a3.6 3.6 0 00-4.66 4.66L4.5 16v3h3l5.54-5.54a3.6 3.6 0 004.66-4.66l-2.55 2.55-2.1-2.1 2.55-2.55z"
+      />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15.3 15.6l1.9 1.9 3-3.6" />
     </svg>
   );
 }
 
 export function ShieldIcon({ className }: { className?: string }) {
+  // A ribboned official seal — government-stamp register, not a shield.
   return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <circle cx="12" cy="9.5" r="6" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9 9.6l1.9 1.9 3.3-3.7" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M8.8 14.8L7.2 21l4.8-2.1 4.8 2.1-1.6-6.2" />
     </svg>
   );
 }
 
 export function ArrowUpRightIcon({ className }: { className?: string }) {
   return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M7 17L17 7M9 7h8v8" />
     </svg>
   );
 }
 
 export function DollarSignIcon({ className }: { className?: string }) {
+  // A coin, not a $ sign — this product deals in shillings.
   return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.5-2.303.5-3.678L15.5 15.5m-3-5.636l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.5-2.303.5-3.678L15.5 9.5" />
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <circle cx="12" cy="12" r="7.5" />
+      <circle cx="12" cy="12" r="4" strokeDasharray="1.6 2.1" />
     </svg>
   );
 }
 
 export function PieChartIcon({ className }: { className?: string }) {
+  // A 2x2 ledger block, not a pie/donut — see design plan.
   return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 6a7.5 7.5 0 107.5 7.5h-7.5V6z" />
-      <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 10.5H21A7.5 7.5 0 0013.5 3v7.5z" />
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <rect x="4" y="4" width="7" height="7" rx="1" />
+      <rect x="13" y="4" width="7" height="7" rx="1" />
+      <rect x="4" y="13" width="7" height="7" rx="1" />
+      <rect x="13" y="13" width="7" height="7" rx="1" />
     </svg>
   );
 }
 
 export function MailIcon({ className }: { className?: string }) {
+  // An envelope with a small wax-seal mark.
   return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <rect x="3.5" y="5.5" width="17" height="13" rx="1.5" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4 7l8 6 8-6" />
+      <circle cx="12" cy="14.4" r="1.3" fill="currentColor" stroke="none" />
     </svg>
   );
 }
 
 export function ClipboardListIcon({ className }: { className?: string }) {
+  // A ruled ledger sheet on a clip, one line ticked off.
   return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6a2.25 2.25 0 00-2.25-2.25H6A2.25 2.25 0 003.75 6v8.25A2.25 2.25 0 006 16.5h.75m3 3h.75m-3 0h3.75m-3.75 0h3.75M12 4.5v15m0 0H9m3 0h3" />
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <rect x="6" y="4.5" width="12" height="16.5" rx="1.5" />
+      <path fill="currentColor" stroke="none" d="M9 3.2h6v2.1H9z" />
+      <path strokeLinecap="round" d="M8.5 10h7M8.5 13.2h7" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M8.5 16.4l1.3 1.2 2-2.3" />
     </svg>
   );
 }
 
 export function CheckCircleIcon({ className }: { className?: string }) {
+  // "Confirmed" stamp — a rubber-stamp double ring with a check.
   return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <circle cx="12" cy="12" r="8.4" />
+      <circle cx="12" cy="12" r="5.8" opacity="0.45" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M8.7 12.2l2.3 2.3 4.3-4.7" />
     </svg>
   );
 }
 
 export function XCircleIcon({ className }: { className?: string }) {
+  // "Void" stamp — same ring family as Confirmed, marked instead of ticked.
   return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <circle cx="12" cy="12" r="8.4" />
+      <circle cx="12" cy="12" r="5.8" opacity="0.45" />
+      <path strokeLinecap="round" d="M9.6 9.6l4.8 4.8m0-4.8l-4.8 4.8" />
     </svg>
   );
 }
 
 export function ClockIcon({ className }: { className?: string }) {
+  // "Pending" stamp — half-filled, mid-impression, same ring family.
   return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <circle cx="12" cy="12" r="8.4" />
+      <path fill="currentColor" stroke="none" opacity="0.55" d="M3.6 12a8.4 8.4 0 0016.8 0H12z" />
     </svg>
   );
 }
