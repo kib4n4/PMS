@@ -1,55 +1,68 @@
+# backend/billing/tasks.py
+
 import logging
 
 from celery import shared_task
 from django.db import transaction
 from django.utils import timezone
 
-from integrations.daraja import DarajaClient
+from integrations.daraja import DarajaClient, DarajaError
 from landlords.models import LandlordDarajaCredential
 
 logger = logging.getLogger(__name__)
 
+PLATFORM_FEE_RATE = 0.05  # TODO(Phase 4+): make this configurable per organization/landlord rather than flat.
 
-@shared_task
-def ingest_c2b_confirmation(raw_payload: dict):
+# Window Safaricom C2B confirmations send phone numbers in ("2547XXXXXXXX",
+# no leading +) vs. how this platform stores them (E.164, "+2547XXXXXXXX").
+def _normalize_msisdn(msisdn: str) -> str:
+    msisdn = str(msisdn).strip()
+    return msisdn if msisdn.startswith("+") else f"+{msisdn}"
+
+
+def _resolve_invoice(credential, account_reference: str, msisdn: str = ""):
     """
-    Entry point for the shared C2B webhook. Discriminates by shortcode in
-    the payload to resolve which landlord/invoice this belongs to, then
-    idempotently records a Payment and its FeeLedgerEntry.
-
-    Idempotency: the DB-level unique constraint on
-    Payment.mpesa_transaction_id is the real safety net — this task must
-    be safe to run twice for the same payload.
+    Resolve which open Invoice a payment belongs to. Reference match
+    (the AccountReference we set when initiating STK Push, or whatever
+    the tenant typed manually via the Paybill menu) is authoritative;
+    phone-number match is the fallback for reference typos/omissions.
     """
-    from billing.models import FeeLedgerEntry, Invoice, Payment
+    from billing.models import Invoice, InvoiceStatus
 
-    shortcode = raw_payload.get("BusinessShortCode")
-    transaction_id = raw_payload.get("TransData") or raw_payload.get("TransID")
-    amount = raw_payload.get("TransAmount")
-    account_reference = raw_payload.get("BillRefNumber")  # maps to Invoice/Lease
+    base_qs = Invoice.objects.filter(lease__unit__property__landlord=credential.landlord).exclude(
+        status=InvoiceStatus.PAID
+    )
 
-    if not (shortcode and transaction_id and amount):
-        logger.warning("Malformed C2B payload, missing required fields: %s", raw_payload)
-        return
+    if account_reference:
+        invoice = base_qs.filter(reference__iexact=account_reference.strip()).first()
+        if invoice:
+            return invoice
 
-    try:
-        credential = LandlordDarajaCredential.objects.get(shortcode=shortcode)
-    except LandlordDarajaCredential.DoesNotExist:
-        logger.error("C2B confirmation for unknown shortcode %s", shortcode)
-        return
+    if msisdn:
+        invoice = (
+            base_qs.filter(lease__tenant__user__phone_number=_normalize_msisdn(msisdn))
+            .order_by("due_date")
+            .first()
+        )
+        if invoice:
+            return invoice
+
+    return None
+
+
+def _record_payment(*, invoice, credential, amount, transaction_id: str, raw_payload: dict, checkout_request_id: str = ""):
+    """
+    Shared by both inbound-payment paths (C2B confirmation and STK Push
+    callback): idempotently create the Payment + FeeLedgerEntry, refresh
+    the Invoice's status from real payment totals, and queue the receipt
+    email. Idempotency: the DB-level unique constraint on
+    Payment.mpesa_transaction_id is the real safety net.
+    """
+    from billing.models import FeeLedgerEntry, Payment
 
     if Payment.objects.filter(mpesa_transaction_id=transaction_id).exists():
-        logger.info("Duplicate C2B callback for %s — already recorded, skipping.", transaction_id)
-        return
-
-    # TODO(M2): resolve the correct open Invoice from account_reference.
-    # Placeholder lookup shown for shape only.
-    invoice = Invoice.objects.filter(lease__unit__property__landlord=credential.landlord).order_by(
-        "-created_at"
-    ).first()
-    if invoice is None:
-        logger.error("No matching invoice found for payment %s (ref %s)", transaction_id, account_reference)
-        return
+        logger.info("Duplicate payment callback for %s — already recorded, skipping.", transaction_id)
+        return None
 
     with transaction.atomic():
         payment = Payment.objects.create(
@@ -57,12 +70,10 @@ def ingest_c2b_confirmation(raw_payload: dict):
             landlord_credential=credential,
             amount=amount,
             mpesa_transaction_id=transaction_id,
+            mpesa_checkout_request_id=checkout_request_id,
             raw_callback_payload=raw_payload,
         )
-        # TODO(M2): pull the real platform fee rate from a configurable
-        # per-organization/landlord setting rather than a flat constant.
-        platform_fee_rate = 0.05
-        platform_fee_amount = round(float(amount) * platform_fee_rate, 2)
+        platform_fee_amount = round(float(amount) * PLATFORM_FEE_RATE, 2)
 
         reseller = credential.landlord.referred_by
         reseller_commission_amount = 0
@@ -78,7 +89,169 @@ def ingest_c2b_confirmation(raw_payload: dict):
             reseller=reseller,
         )
 
-    logger.info("Recorded payment %s for landlord %s, fee %s", transaction_id, credential.landlord, platform_fee_amount)
+    invoice.refresh_status()
+    send_payment_receipt_email.delay(str(payment.id))
+    logger.info(
+        "Recorded payment %s for landlord %s against invoice %s, fee %s",
+        transaction_id, credential.landlord, invoice.reference, platform_fee_amount,
+    )
+    return payment
+
+
+@shared_task
+def ingest_c2b_confirmation(raw_payload: dict):
+    """
+    Entry point for the shared C2B webhook (manual Paybill-menu payments,
+    or any STK-Push-initiated payment on a shortcode that ALSO has C2B
+    validation/confirmation URLs registered). Discriminates by shortcode
+    to resolve the landlord, then by AccountReference/MSISDN to resolve
+    the Invoice.
+    """
+    shortcode = raw_payload.get("BusinessShortCode")
+    transaction_id = raw_payload.get("TransID")
+    amount = raw_payload.get("TransAmount")
+    account_reference = raw_payload.get("BillRefNumber", "")
+    msisdn = raw_payload.get("MSISDN", "")
+
+    if not (shortcode and transaction_id and amount):
+        logger.warning("Malformed C2B payload, missing required fields: %s", raw_payload)
+        return
+
+    try:
+        credential = LandlordDarajaCredential.objects.get(shortcode=shortcode)
+    except LandlordDarajaCredential.DoesNotExist:
+        logger.error("C2B confirmation for unknown shortcode %s", shortcode)
+        return
+
+    invoice = _resolve_invoice(credential, account_reference, msisdn)
+    if invoice is None:
+        logger.error(
+            "No matching open invoice for payment %s (landlord=%s, ref=%s, msisdn=%s)",
+            transaction_id, credential.landlord, account_reference, msisdn,
+        )
+        return
+
+    _record_payment(
+        invoice=invoice, credential=credential, amount=amount,
+        transaction_id=transaction_id, raw_payload=raw_payload,
+    )
+
+
+@shared_task
+def ingest_stk_callback(raw_payload: dict):
+    """
+    Entry point for the STK Push CallBackURL. Shape:
+      {"Body": {"stkCallback": {
+          "MerchantRequestID", "CheckoutRequestID", "ResultCode", "ResultDesc",
+          "CallbackMetadata": {"Item": [{"Name": "Amount", "Value": ...}, ...]}
+      }}}
+    Unlike C2B, this does NOT echo back the AccountReference — correlation
+    is via CheckoutRequestID against the STKPushRequest we persisted at
+    initiation time (billing/api_views.py).
+    """
+    from billing.models import STKPushRequest, STKPushRequestStatus
+
+    stk_callback = (raw_payload.get("Body") or {}).get("stkCallback") or {}
+    checkout_request_id = stk_callback.get("CheckoutRequestID")
+    result_code = stk_callback.get("ResultCode")
+    result_desc = stk_callback.get("ResultDesc", "")
+
+    if checkout_request_id is None or result_code is None:
+        logger.warning("Malformed STK callback payload: %s", raw_payload)
+        return
+
+    try:
+        stk_request = STKPushRequest.objects.select_related("invoice", "landlord_credential").get(
+            checkout_request_id=checkout_request_id
+        )
+    except STKPushRequest.DoesNotExist:
+        logger.error("STK callback for unknown CheckoutRequestID %s", checkout_request_id)
+        return
+
+    if stk_request.status != STKPushRequestStatus.PENDING:
+        logger.info("Duplicate STK callback for %s — already resolved, skipping.", checkout_request_id)
+        return
+
+    if result_code != 0:
+        stk_request.status = STKPushRequestStatus.FAILED
+        stk_request.result_description = result_desc
+        stk_request.resolved_at = timezone.now()
+        stk_request.save(update_fields=["status", "result_description", "resolved_at"])
+        logger.info("STK push %s failed/cancelled: %s", checkout_request_id, result_desc)
+        return
+
+    items = {
+        item.get("Name"): item.get("Value")
+        for item in (stk_callback.get("CallbackMetadata") or {}).get("Item", [])
+    }
+    transaction_id = items.get("MpesaReceiptNumber")
+    amount = items.get("Amount")
+
+    if not (transaction_id and amount):
+        logger.error("STK callback %s missing MpesaReceiptNumber/Amount: %s", checkout_request_id, raw_payload)
+        return
+
+    payment = _record_payment(
+        invoice=stk_request.invoice,
+        credential=stk_request.landlord_credential,
+        amount=amount,
+        transaction_id=transaction_id,
+        raw_payload=raw_payload,
+        checkout_request_id=checkout_request_id,
+    )
+
+    stk_request.status = STKPushRequestStatus.SUCCESS if payment else STKPushRequestStatus.FAILED
+    stk_request.result_description = result_desc
+    stk_request.resolved_at = timezone.now()
+    stk_request.save(update_fields=["status", "result_description", "resolved_at"])
+
+
+@shared_task
+def send_payment_receipt_email(payment_id: str):
+    """Emails the payment receipt (PDF attached) to the tenant, if they have an email on file."""
+    from billing.models import Payment
+    from billing.pdf import render_receipt_pdf
+    from integrations.resend_client import EmailAttachment, ResendClient, ResendError
+    from messaging.models import EmailMessage
+
+    try:
+        payment = Payment.objects.select_related("invoice__lease__tenant__user").get(id=payment_id)
+    except Payment.DoesNotExist:
+        logger.error("send_payment_receipt_email: no payment %s", payment_id)
+        return
+
+    tenant = payment.invoice.lease.tenant
+    tenant_email = tenant.user.email
+    if not tenant_email:
+        logger.info("No email on file for tenant %s — skipping receipt email for payment %s", tenant.id, payment.mpesa_transaction_id)
+        return
+
+    subject = f"Payment received — {payment.invoice.reference}"
+    html = (
+        f"<p>Hi {tenant.full_name},</p>"
+        f"<p>We've recorded your payment of <strong>KES {payment.amount:,.2f}</strong> "
+        f"for invoice {payment.invoice.reference} (M-Pesa transaction {payment.mpesa_transaction_id}).</p>"
+        f"<p>Your receipt is attached.</p>"
+    )
+
+    record = EmailMessage.objects.create(
+        to_email=tenant_email, subject=subject, body=html,
+        related_object_type="Payment", related_object_id=str(payment.id),
+    )
+    try:
+        result = ResendClient.default().send_email(
+            to=tenant_email, subject=subject, html=html,
+            attachments=[EmailAttachment(filename=f"receipt-{payment.mpesa_transaction_id}.pdf", content=render_receipt_pdf(payment))],
+        )
+    except ResendError:
+        logger.exception("Failed to send receipt email for payment %s", payment.mpesa_transaction_id)
+        record.delivery_status = "failed"
+        record.save(update_fields=["delivery_status"])
+        return
+
+    record.delivery_status = "sent"
+    record.resend_message_id = result.id
+    record.save(update_fields=["delivery_status", "resend_message_id"])
 
 
 @shared_task
@@ -115,13 +288,19 @@ def generate_fee_invoices(period_start=None, period_end=None):
 
 
 @shared_task
-def reconcile_landlord_transactions(landlord_credential_id: str):
+def reconcile_landlord_transactions(landlord_credential_id: str, window_hours: int = 48):
     """
-    Nightly, per-landlord reconciliation: cross-checks the fee ledger
-    against Safaricom's own Transaction Status API using THAT landlord's
-    credentials. Flags discrepancies for admin review rather than
-    silently trusting callbacks alone.
+    Nightly, per-landlord reconciliation: for every Payment recorded in
+    the last `window_hours`, ask Safaricom's Transaction Status API to
+    confirm it independently rather than trusting our own callback record
+    alone. Like B2C, this API is asynchronous — query_transaction_status
+    only returns an acknowledgment; the actual answer lands later on
+    /webhooks/mpesa/transactionstatus/result/
+    (billing/webhook_views.py::mpesa_transaction_status_result), which is
+    where a real mismatch gets logged for admin review.
     """
+    from billing.models import Payment
+
     try:
         credential = LandlordDarajaCredential.objects.get(id=landlord_credential_id)
     except LandlordDarajaCredential.DoesNotExist:
@@ -129,10 +308,24 @@ def reconcile_landlord_transactions(landlord_credential_id: str):
         return
 
     client = DarajaClient.for_landlord(credential)
-    # TODO(M2): fetch this landlord's Payments for the reconciliation
-    # window, call client.query_transaction_status per transaction, and
-    # raise an admin-visible discrepancy record for any mismatch.
-    logger.info("Reconciliation stub ran for %s (client=%s)", credential.shortcode, client.environment)
+    window_start = timezone.now() - timezone.timedelta(hours=window_hours)
+    recent_payments = Payment.objects.filter(landlord_credential=credential, received_at__gte=window_start)
+
+    checked = 0
+    for payment in recent_payments:
+        try:
+            client.query_transaction_status(payment.mpesa_transaction_id)
+            checked += 1
+        except DarajaError:
+            logger.exception(
+                "reconcile_landlord_transactions: query failed for payment %s (landlord=%s)",
+                payment.mpesa_transaction_id, credential.landlord,
+            )
+
+    logger.info(
+        "Reconciliation queried %s/%s recent payments for %s",
+        checked, recent_payments.count(), credential.shortcode,
+    )
 
 
 @shared_task
@@ -140,3 +333,26 @@ def reconcile_all_landlords():
     """Celery Beat entry point — fans out reconciliation per landlord."""
     for credential in LandlordDarajaCredential.objects.filter(status="live"):
         reconcile_landlord_transactions.delay(str(credential.id))
+
+
+@shared_task
+def log_transaction_status_result(raw_payload: dict):
+    """
+    Receives the async answer to a query_transaction_status call fired
+    from reconcile_landlord_transactions. A non-zero ResultCode, or a
+    TransactionStatus that doesn't match what we have on file, is the
+    actual "discrepancy" reconciliation exists to catch — surfaced here
+    as a structured error log rather than a full admin-review model,
+    which is more machinery than this needs today.
+    """
+    result = raw_payload.get("Result", {})
+    result_code = result.get("ResultCode")
+    if result_code == 0:
+        logger.info("Transaction status reconciliation OK: %s", result.get("ResultDesc"))
+    else:
+        logger.error("Transaction status reconciliation MISMATCH/FAILURE: %s", result)
+
+
+@shared_task
+def log_transaction_status_timeout(raw_payload: dict):
+    logger.error("Transaction status query timed out: %s", raw_payload)

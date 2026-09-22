@@ -1,19 +1,45 @@
+"use client";
+
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
 import { cn } from "@/lib/utils";
+import { Role, useAuth } from "@/lib/auth-context";
 
-const navItems = [
-  { href: "/", label: "Dashboard", icon: DashboardIcon, roles: ["admin", "landlord", "reseller", "investor", "caretaker"] },
-  { href: "/landlord", label: "Landlord", icon: BuildingIcon, roles: ["admin", "landlord"] },
-  { href: "/reseller", label: "Reseller", icon: UsersIcon, roles: ["admin", "reseller"] },
-  { href: "/investor", label: "Investor", icon: TrendingUpIcon, roles: ["admin", "investor"] },
-  { href: "/caretaker", label: "Caretaker", icon: WrenchIcon, roles: ["admin", "caretaker"] },
-  { href: "/admin", label: "Admin", icon: ShieldIcon, roles: ["admin"] },
+type NavItem = {
+  href: string;
+  label: string;
+  icon: (props: { className?: string }) => JSX.Element;
+  roles?: Role[];
+  superAdminOnly?: boolean;
+  alwaysVisible?: boolean;
+};
+
+// Card/nav visibility follows the platform's role hierarchy: a role only
+// sees its own dashboard, never another role's — only super admin
+// (is_super_admin, not just role === "admin") sees everything.
+const navItems: NavItem[] = [
+  { href: "/", label: "Dashboard", icon: DashboardIcon, alwaysVisible: true },
+  { href: "/landlord", label: "Landlord", icon: BuildingIcon, roles: ["landlord"] },
+  { href: "/reseller", label: "Reseller", icon: UsersIcon, roles: ["reseller"] },
+  { href: "/investor", label: "Investor", icon: TrendingUpIcon, roles: ["investor"] },
+  { href: "/caretaker", label: "Caretaker", icon: WrenchIcon, roles: ["caretaker"] },
+  { href: "/admin", label: "Admin", icon: ShieldIcon, superAdminOnly: true },
 ];
 
-export default function Sidebar({ userRole = "landlord" }: { userRole?: string }) {
+function isVisible(item: NavItem, role: Role | null, isSuperAdmin: boolean): boolean {
+  if (isSuperAdmin) return true;
+  if (item.alwaysVisible) return true;
+  if (item.superAdminOnly) return false;
+  return !!role && (item.roles ?? []).includes(role);
+}
+
+export default function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
+  const { user, role, isSuperAdmin, logout } = useAuth();
+
+  const visibleItems = navItems.filter((item) => isVisible(item, role, isSuperAdmin));
 
   return (
     <aside className="flex h-screen w-64 flex-col border-r border-ink-800 bg-ink-900 text-mist-200">
@@ -25,8 +51,7 @@ export default function Sidebar({ userRole = "landlord" }: { userRole?: string }
       </div>
 
       <nav className="flex-1 space-y-1 p-3" aria-label="Main navigation">
-        {navItems
-          .filter((item) => item.roles.includes(userRole))
+        {visibleItems
           .map((item) => {
             const isActive = pathname === item.href || (item.href !== "/" && pathname.startsWith(item.href));
             return (
@@ -52,10 +77,22 @@ export default function Sidebar({ userRole = "landlord" }: { userRole?: string }
           <div className="flex h-8 w-8 items-center justify-center rounded-full bg-teal-500/20 text-teal-400">
             <UsersIcon className="h-4 w-4" />
           </div>
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium text-mist-100">Demo User</p>
-            <p className="truncate text-xs text-mist-400 capitalize">{userRole}</p>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium text-mist-100">{user?.username ?? "…"}</p>
+            <p className="truncate text-xs text-mist-400 capitalize">
+              {isSuperAdmin ? "Super Admin" : role ?? ""}
+            </p>
           </div>
+          <button
+            type="button"
+            onClick={async () => {
+              await logout();
+              router.push("/login");
+            }}
+            className="shrink-0 text-xs font-medium text-mist-400 transition-colors hover:text-mist-100"
+          >
+            Log out
+          </button>
         </div>
       </div>
     </aside>

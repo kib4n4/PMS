@@ -82,7 +82,7 @@ const priorityPill = {
 
 export default function LandlordDashboard() {
   return (
-    <DashboardLayout userRole="landlord">
+    <DashboardLayout>
       <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-bold text-ink-900">Landlord Dashboard</h1>

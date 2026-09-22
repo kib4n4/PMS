@@ -13,6 +13,8 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 import os
+import sys
+from datetime import timedelta
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -33,6 +35,12 @@ DEBUG = os.environ.get("DJANGO_DEBUG", "true").lower() == "true"
 
 ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
 
+# Public HTTPS origin this backend is reachable at — used to build Daraja
+# callback URLs (CallBackURL/ResultURL/QueueTimeOutURL). Safaricom cannot
+# reach localhost, so this MUST be a real public URL in any environment
+# that actually initiates STK Push / B2C payments.
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://api.yourdomain.com")
+
 
 # Application definition
 
@@ -47,10 +55,14 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
+    'drf_spectacular',
     'corsheaders',
     'django_celery_beat',
     # Project apps — one per core module in the design doc.
     'accounts',
+    'credentials',
     'landlords',
     'properties',
     'leasing',
@@ -59,6 +71,8 @@ INSTALLED_APPS = [
     'caretakers',
     'maintenance',
     'messaging',
+    'taxes',
+    'api_auth',
     'audit',
     'integrations',
 ]
@@ -88,9 +102,59 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'oauth2_provider.contrib.rest_framework.OAuth2Authentication',
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        # Session auth stays enabled only for the browsable API / Django
+        # admin — not used by the frontend or external clients.
         'rest_framework.authentication.SessionAuthentication',
     ],
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Dime PMS API',
+    'DESCRIPTION': (
+        'Property management, payments, messaging, and tax-filing API for the Dime PMS platform. '
+        'Internal endpoints under /api/ use JWT (user login); external-integrator endpoints under '
+        '/api/external/ use the OAuth2 client-credentials grant issued by POST /api/oauth/token/.'
+    ),
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    # Webhooks (billing/messaging) are plain Django views, not DRF, so
+    # they never appear here regardless of this setting — they speak
+    # Safaricom/Meta's payload formats, not this platform's public API.
+}
+
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+    'UPDATE_LAST_LOGIN': True,
+    'AUTH_HEADER_TYPES': ('Bearer',),
+    'USER_ID_FIELD': 'id',
+    'USER_ID_CLAIM': 'user_id',
+}
+
+# --- CORS ---------------------------------------------------------------
+# The Next.js frontend runs on a different origin. Auth cookies set by the
+# frontend's own API route handlers never reach Django directly (the
+# frontend forwards the Bearer token itself), so credentials do not need
+# to be allowed cross-origin — kept false to avoid widening the attack
+# surface unnecessarily.
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+    if origin.strip()
+]
+CORS_ALLOW_CREDENTIALS = False
+
+# --- Credential encryption ------------------------------------------------
+# Master key for encrypting DB-stored third-party credentials (Daraja,
+# WhatsApp, Resend, KRA, ...) at rest — see credentials/fields.py. MUST be
+# a real Fernet key (44-char urlsafe base64) from the environment in any
+# real deployment; the fallback below is dev-only and logged as such by
+# credentials/fields.py the first time it's used.
+CREDENTIAL_ENCRYPTION_KEY = os.environ.get("CREDENTIAL_ENCRYPTION_KEY", "")
 
 # Celery — broker/result backend point at Redis (see docker-compose.yml).
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
@@ -100,6 +164,15 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = 'UTC'
+
+# `manage.py test` has no Redis broker available and doesn't need one —
+# tasks run synchronously, in-process, so `.delay()` calls throughout the
+# codebase (billing/tasks.py, partners/tasks.py, ...) don't hang retrying
+# a connection that will never come up. Real deployments (runserver,
+# celery worker) are unaffected since 'test' isn't in their argv.
+if 'test' in sys.argv:
+    CELERY_TASK_ALWAYS_EAGER = True
+    CELERY_TASK_EAGER_PROPAGATES = True
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
