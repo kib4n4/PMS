@@ -45,6 +45,9 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://api.yourdomain.com"
 # Application definition
 
 INSTALLED_APPS = [
+    'config',
+    'unfold',
+    'oauth2_provider',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -71,15 +74,34 @@ INSTALLED_APPS = [
     'taxes',
     'api_auth',
     'audit',
+    'integrations',
 ]
 
 AUTH_USER_MODEL = 'accounts.User'
+OAUTH2_PROVIDER = {
+    'CLIENT_ID_GENERATOR': 'oauth2_provider.generators.ClientIdGenerator',
+    'CLIENT_SECRET_GENERATOR': 'oauth2_provider.generators.ClientSecretGenerator',
+    'ACCESS_TOKEN_EXPIRE_SECONDS': 3600, # 1 hour
+    'REFRESH_TOKEN_EXPIRE_SECONDS': 2592000,  # 30 days
+    'ROTATE_REFRESH_TOKEN': True,
+    'PKCE_REQUIRED': True,
+    'PKCE_METHODS': ['plain', 'S256'],
+    'OAUTH2_VALIDATOR_CLASS': 'accounts.oauth.PMSOAuth2Validator',
+    'SCOPES': {
+        'read': 'Read access to resources',
+        'write': 'Write access to resources',
+        'tenants': 'Manage tenants and leases',
+        'properties': 'Read/manage properties and units',
+        'billing': ' Read/manage payments and invoices',
+    },
+}
 
 REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
     'DEFAULT_AUTHENTICATION_CLASSES': [
+        'oauth2_provider.contrib.rest_framework.OAuth2Authentication',
         'rest_framework_simplejwt.authentication.JWTAuthentication',
         # Session auth stays enabled only for the browsable API / Django
         # admin — not used by the frontend or external clients.
@@ -168,7 +190,7 @@ ROOT_URLCONF = 'config.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [BASE_DIR / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -242,3 +264,117 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+
+# Serve additional static files during development; include the project-level static dir
+STATICFILES_DIRS = [BASE_DIR / 'static']
+
+CORS_ALLOWED_ORIGINS = ["http://localhost:3000"]
+
+LOGIN_URL = '/accounts/login/'
+
+
+# --- Field-level encryption for DB-stored provider credentials -----------
+# ProviderCredential (integrations app) stores Twilio/Resend/Daraja secrets
+# in the database rather than in code, encrypted at rest with Fernet.
+# Generate a real key with:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# and set it as FIELD_ENCRYPTION_KEY in the environment — never commit a
+# real key. The fallback below is dev-only and must not reach production.
+FIELD_ENCRYPTION_KEY = os.environ.get(
+    "FIELD_ENCRYPTION_KEY", "cRvE7t9m1zQ5cW3s7d0jLK8kzT2yF4xP6nB1hU9wRfA="
+)
+
+# --- Resend (transactional email) — used to deliver OTP login codes ------
+# Platform-level: OTP is a platform identity concern, not per-landlord, so
+# this stays a plain env var rather than a DB-stored ProviderCredential.
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+RESEND_OTP_FROM_EMAIL = os.environ.get("RESEND_OTP_FROM_EMAIL", "otp@dimeconsultants.africa")
+
+# --- Twilio (WhatsApp) ----------------------------------------------------
+# Platform-level fallback account, used when a landlord has not yet
+# onboarded their own Twilio WhatsApp sender (see integrations.models.
+# ProviderCredential and integrations.whatsapp.WhatsAppClient.for_landlord).
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
+TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM", "")  # e.g. "whatsapp:+14155238886"
+
+# Static files collection (for production)
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+# Unfold admin theme configuration. Replace the default Django admin with the
+# modern Unfold theme and a custom 'properties' palette that stays mostly blue.
+UNFOLD = {
+    "SITE_TITLE": "PMS Properties",
+    "SITE_HEADER": "PMS Admin",
+    "SITE_SUBHEADER": "Properties, Landlords & Integrations",
+    "SITE_ICON": None,
+    "SITE_LOGO": None,
+    "SHOW_HISTORY": True,
+    "SHOW_VIEW_ON_SITE": False,
+    "SHOW_LANGUAGES": False,
+    "SHOW_BACK_BUTTON": False,
+    "COLORS": {
+        "base": {
+            "50": "#f8fbff",
+            "100": "#eef6ff",
+            "200": "#dfeeff",
+            "300": "#cfe5ff",
+            "400": "#b6d4ff",
+            "500": "#8db7ff",
+            "600": "#5a8df7",
+            "700": "#3d76ea",
+            "800": "#2d5ecb",
+            "900": "#1d4fa3",
+            "950": "#153a75",
+        },
+        "primary": {
+            "50": "#edf6ff",
+            "100": "#d9ebff",
+            "200": "#b7d9ff",
+            "300": "#8dbdff",
+            "400": "#5f9fff",
+            "500": "#3d7ef7",
+            "600": "#2d68d5",
+            "700": "#214eb4",
+            "800": "#1d3d8a",
+            "900": "#16336f",
+            "950": "#0d224d",
+        },
+    },
+    "THEME": os.environ.get("DEFAULT_ADMIN_THEME", "theme-1"),
+    "STYLES": [
+        "/static/css/admin-properties.css",
+    ],
+    "SCRIPTS": [
+        "/static/js/admin-theme.js",
+    ],
+    "SIDEBAR": {
+        "show_search": True,
+        "show_all_applications": False,
+        "navigation": [],
+    },
+}
+
+# Back-compat default theme names for legacy admin JS if needed.
+DEFAULT_ADMIN_THEME = os.environ.get("DEFAULT_ADMIN_THEME", "theme-1")
+ADMIN_THEME_CHOICES = [
+    ("theme-1", "Blue (Default)"),
+    ("theme-2", "Cyan"),
+    ("theme-3", "Indigo"),
+    ("theme-4", "Teal"),
+    ("theme-5", "Purple"),
+    ("theme-6", "Green"),
+    ("theme-7", "Slate"),
+]
+
+# Provider -> recommended auth type mapping (used by admin JS & server-side tooling)
+PROVIDER_AUTH_MAPPING = {
+    'twilio': 'oauth2',
+    'daraja': 'oauth2',
+    'resend': 'bearer',
+}
+
+# Ensure CORS allowed origins include the local dev host for frontend if present
+_cors_extra = os.environ.get("EXTRA_CORS_ALLOWED_ORIGINS", "")
+if _cors_extra:
+    CORS_ALLOWED_ORIGINS = list(set(CORS_ALLOWED_ORIGINS + _cors_extra.split(",")))

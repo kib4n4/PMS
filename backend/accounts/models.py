@@ -19,6 +19,11 @@ class User(AbstractUser):
     """
     Phone-number-first identity for tenants/caretakers/resellers/investors/
     landlords (OTP login). Admin/staff can still use username+password.
+
+    NOTE: identity lookup (who you're logging in as) stays phone-first —
+    only the OTP *delivery channel* is now email via Resend (see
+    OTPRequest below and accounts/services/otp.py), so a user needs a
+    verified email on file to complete OTP login.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -36,18 +41,22 @@ class User(AbstractUser):
 
 class OTPRequest(models.Model):
     """
-    One-time-password requests for phone-first login, delivered via
-    WhatsApp (primary) or SMS (fallback). Kept separate from User so OTP
-    churn doesn't bloat the auth table.
+    One-time-password requests for phone-first login. The code is now
+    delivered via Resend to the user's email (see accounts/services/otp.py)
+    rather than WhatsApp/SMS — `phone_number` remains the identity lookup
+    key, `email` is where the code actually gets sent.
     """
+
+    class Channel(models.TextChoices):
+        EMAIL = "email", "Email (Resend)"
+        WHATSAPP = "whatsapp", "WhatsApp (legacy, unused)"
+        SMS = "sms", "SMS (legacy, unused)"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     phone_number = models.CharField(max_length=20)
+    email = models.EmailField(blank=True, default="")
     code_hash = models.CharField(max_length=128)
-    channel = models.CharField(
-        max_length=10, choices=[("whatsapp", "WhatsApp"), ("sms", "SMS"), ("email", "Email")],
-        default="whatsapp",
-    )
+    channel = models.CharField(max_length=10, choices=Channel.choices, default=Channel.EMAIL)
     expires_at = models.DateTimeField()
     consumed_at = models.DateTimeField(null=True, blank=True)
     attempt_count = models.PositiveSmallIntegerField(default=0)

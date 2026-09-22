@@ -29,6 +29,8 @@ def healthz(request):
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('healthz/', healthz),
+    path('o/', include(('oauth2_provider.urls', 'oauth2_provider'))),
+    path('accounts/', include('accounts.urls')),
     path('api/auth/', include('accounts.urls')),
     path('api/', include('leasing.urls')),
     path('api/', include('billing.urls')),

@@ -1,18 +1,17 @@
-# backend/messaging/admin.py
-
 from django.contrib import admin
+from unfold.admin import ModelAdmin
 
 from .models import EmailMessage, NotificationTemplate, WhatsAppMessage
 
 
 @admin.register(NotificationTemplate)
-class NotificationTemplateAdmin(admin.ModelAdmin):
+class NotificationTemplateAdmin(ModelAdmin):
     list_display = ("name", "version", "approval_status", "meta_template_id")
     list_filter = ("approval_status",)
 
 
 @admin.register(WhatsAppMessage)
-class WhatsAppMessageAdmin(admin.ModelAdmin):
+class WhatsAppMessageAdmin(ModelAdmin):
     list_display = ("phone_number", "direction", "template_used", "delivery_status", "created_at")
     list_filter = ("direction", "delivery_status")
     search_fields = ("phone_number",)

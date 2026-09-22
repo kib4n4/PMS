@@ -5,7 +5,7 @@ from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from accounts.permissions import IsLandlord
+from accounts.permissions import IsLandlord, HasOAuthScopeOrIsSessionUser
 
 from .models import Lease, LeaseStatus
 from .serializers import LeaseOffboardSerializer, LeaseSerializer, TenantOnboardSerializer
@@ -18,7 +18,7 @@ class LandlordTenantViewSet(viewsets.GenericViewSet):
     is enforced in get_queryset, not just at the permission-class level.
     """
 
-    permission_classes = [permissions.IsAuthenticated, IsLandlord]
+    permission_classes = [HasOAuthScopeOrIsSessionUser, IsLandlord]
     serializer_class = LeaseSerializer
     # Unused at runtime (get_queryset() below is what actually runs) —
     # present only so schema generation can infer the lookup field's

@@ -11,6 +11,7 @@
 .env.local
 .env*.local
 /frontend/node_modules/
+.venv/
 /frontend/.next/
 *.log
-.DS_Store
+.DS_Storebackend/.venv/
