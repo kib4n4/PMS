@@ -66,3 +66,30 @@ class WhatsAppMessage(models.Model):
 
     def __str__(self):
         return f"{self.direction} — {self.phone_number} — {self.created_at:%Y-%m-%d %H:%M}"
+
+
+class EmailMessage(models.Model):
+    """
+    Outbound-only email log (audit + debugging trail), mirroring
+    WhatsAppMessage's shape. There's no inbound email channel on this
+    platform — email is a delivery channel for OTPs and notifications,
+    never a conversation surface.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    to_email = models.EmailField()
+    subject = models.CharField(max_length=255)
+    body = models.TextField()
+    delivery_status = models.CharField(max_length=30, blank=True)
+    resend_message_id = models.CharField(max_length=100, blank=True)
+    related_object_type = models.CharField(
+        max_length=100, blank=True, help_text="e.g. 'Payment', 'FeeInvoice', 'OTPRequest'"
+    )
+    related_object_id = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["related_object_type", "related_object_id"])]
+
+    def __str__(self):
+        return f"{self.to_email} — {self.subject} — {self.created_at:%Y-%m-%d %H:%M}"

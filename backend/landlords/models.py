@@ -5,6 +5,8 @@ import uuid
 from django.conf import settings
 from django.db import models
 
+from credentials.fields import EncryptedSecretField
+
 
 class Organization(models.Model):
     """Top-level tenant. The management company (e.g. Dime Consultants)."""
@@ -54,12 +56,13 @@ class OnboardingStatus(models.TextChoices):
 
 class LandlordDarajaCredential(models.Model):
     """
-    Each landlord's own Paybill/Till and Daraja app credentials (Option B).
-    Secrets fields below are placeholders for values that MUST live in a
-    real secrets manager (Vault / cloud secrets manager) in production —
-    this model stores only references/metadata, never raw secrets, once
-    wired to the real secrets backend. Until then, do not populate the
-    *_secret_ref fields with anything but a secrets-manager key path.
+    Each landlord's own Paybill/Till and Daraja app credentials (Option B)
+    — this is also the canonical landlord↔payment-info link: a landlord's
+    payment identity IS their shortcode + these credentials, looked up as
+    `landlord.daraja_credential`. Secret fields are encrypted at rest in
+    Postgres (EncryptedSecretField, backed by CREDENTIAL_ENCRYPTION_KEY)
+    rather than routed through an external secrets manager — DB-driven by
+    design, editable from admin without a redeploy.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -70,12 +73,17 @@ class LandlordDarajaCredential(models.Model):
     environment = models.CharField(
         max_length=10, choices=[("sandbox", "Sandbox"), ("live", "Live")], default="sandbox"
     )
-    consumer_key_secret_ref = models.CharField(
-        max_length=255, help_text="Secrets-manager key path, not the raw value"
+    consumer_key = EncryptedSecretField(help_text="Daraja app Consumer Key for this shortcode — encrypted at rest.")
+    consumer_secret = EncryptedSecretField(help_text="Daraja app Consumer Secret — encrypted at rest.")
+    passkey = EncryptedSecretField(
+        blank=True, help_text="Lipa Na M-Pesa Online Passkey — required to initiate STK Push. Encrypted at rest."
     )
-    consumer_secret_secret_ref = models.CharField(max_length=255)
-    initiator_credential_secret_ref = models.CharField(max_length=255)
-    security_credential_secret_ref = models.CharField(max_length=255)
+    initiator_credential = EncryptedSecretField(
+        blank=True, help_text="B2C initiator username, if this landlord ever originates payouts — encrypted at rest."
+    )
+    security_credential = EncryptedSecretField(
+        blank=True, help_text="B2C initiator password (Safaricom-cert-encrypted, then encrypted again at rest)."
+    )
     status = models.CharField(
         max_length=40, choices=OnboardingStatus.choices, default=OnboardingStatus.PENDING
     )

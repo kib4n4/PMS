@@ -20,6 +20,10 @@ class LandlordTenantViewSet(viewsets.GenericViewSet):
 
     permission_classes = [permissions.IsAuthenticated, IsLandlord]
     serializer_class = LeaseSerializer
+    # Unused at runtime (get_queryset() below is what actually runs) —
+    # present only so schema generation can infer the lookup field's
+    # type (UUID) without needing a real authenticated request.
+    queryset = Lease.objects.all()
 
     def get_queryset(self):
         landlord = self.request.user.landlord_profile
