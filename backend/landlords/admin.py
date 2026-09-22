@@ -1,11 +1,9 @@
-# backend/landlords/admin.py
-
 from django.contrib import admin
 from unfold.admin import ModelAdmin
 
 from credentials.admin_utils import SecretWidgetMixin
 
-from .models import Landlord, LandlordDarajaCredential, Organization
+from .models import Landlord, LandlordDarajaCredential, LandlordWhatsAppCredential, Organization
 
 
 @admin.register(Organization)
@@ -30,3 +28,10 @@ class LandlordDarajaCredentialAdmin(SecretWidgetMixin, ModelAdmin):
     list_filter = ("environment", "status", "c2b_urls_registered")
     autocomplete_fields = ("landlord",)
     search_fields = ("shortcode", "landlord__full_name")
+
+
+@admin.register(LandlordWhatsAppCredential)
+class LandlordWhatsAppCredentialAdmin(ModelAdmin):
+    list_display = ("landlord", "environment", "status")
+    list_filter = ("environment", "status")
+    autocomplete_fields = ("landlord",)

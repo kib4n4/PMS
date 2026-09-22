@@ -5,7 +5,8 @@ rent collection (Daraja), platform fee billing, reseller/investor payouts,
 WhatsApp tenant communication, maintenance ticketing, and KRA rental-income
 filing. Backend is Django/DRF with a django-unfold admin theme, RBAC, a
 JWT + OAuth2-client-credentials auth split, and a publicly-documented
-OpenAPI schema; frontend is a Next.js scaffold with mock-data dashboards.
+OpenAPI schema; frontend is a Next.js app with all five role dashboards
+wired to real backend data.
 
 Full architecture and data model: **`CODEBASE_EXPLAINED.md`**.
 Full endpoint reference: **`pms-endpoints.md`**.
@@ -22,8 +23,8 @@ precise breakdown; in short:
   Safaricom-portal C2B URL registration step.
 - **Deliberately deferred (Phase 4+)**: per-landlord fee rates, investor
   revenue-share amount computation, platform B2C float-balance checks.
-- **Not started**: wiring the Next.js frontend to the real JSON endpoints
-  (it renders mock data today; the endpoints exist).
+- **Done**: the Next.js frontend is wired to the real JSON endpoints across
+  all five role dashboards; no mock data remains.
 
 Verify locally (from `backend/`, with the venv active):
 ```bash

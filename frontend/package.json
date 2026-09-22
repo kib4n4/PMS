@@ -1,6 +1,6 @@
 {
-  "_comment": "frontend/package.json",
   "name": "pms-frontend",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
