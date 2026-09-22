@@ -1,4 +1,16 @@
 # docker-compose.yml
+#
+# Single-file deployment for the whole stack: Postgres, Redis, Django
+# (API + Celery worker + Celery beat), and the Next.js frontend.
+#
+#   cp .env.example .env   # fill in the required values
+#   docker compose up --build
+#
+# Ports are published directly (backend on :8000, frontend on :3000) so
+# this is reachable immediately with no extra setup. For a stricter
+# production deployment, put a reverse proxy (Nginx, Caddy, a cloud LB)
+# in front for TLS termination and remove the `ports:` entries below —
+# the services would then only need `expose:`.
 
 services:
   postgres:
@@ -25,6 +37,19 @@ services:
       timeout: 5s
       retries: 5
 
+  # One-off: applies migrations, then exits. backend/worker/beat all wait
+  # for this to finish successfully before starting, so migrations never
+  # race against three services trying to apply them simultaneously.
+  migrate:
+    build: ./backend
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+    command: python manage.py migrate --noinput
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   backend:
     build: ./backend
     restart: unless-stopped
@@ -38,10 +63,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    expose:
-      - "8000"
-    # Host Nginx terminates TLS and reverse-proxies to this container's
-    # HTTP port — this service does not publish ports directly.
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
 
   worker:
     build: ./backend
@@ -57,6 +82,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   beat:
     build: ./backend
@@ -72,15 +99,22 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
-  # frontend:
-  #   build: ./frontend
-  #   restart: unless-stopped
-  #   env_file: .env
-  #   expose:
-  #     - "3000"
-  #   Uncomment once the Next.js app in ./frontend is built out past the
-  #   M1 scaffold — host Nginx will proxy app.<domain> to it.
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    environment:
+      # Container-to-container URL — the browser never talks to this
+      # directly, only this Next.js app's own /api/* route handlers do
+      # (see frontend/lib/backend.ts).
+      BACKEND_API_URL: http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
 
 volumes:
   pms_postgres_data:

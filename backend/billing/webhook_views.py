@@ -7,7 +7,7 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
-from .tasks import ingest_c2b_confirmation
+from .tasks import ingest_c2b_confirmation, ingest_stk_callback, log_transaction_status_result, log_transaction_status_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -17,8 +17,15 @@ logger = logging.getLogger(__name__)
 # the request originates from Safaricom's published IP ranges at the
 # Nginx/network layer, and should additionally validate the shortcode in
 # the payload against a known LandlordDarajaCredential before any side
-# effect runs (ingest_c2b_confirmation already does the latter). Do not
-# remove that lookup when wiring real credentials in M2.
+# effect runs (ingest_c2b_confirmation already does the latter).
+
+
+def _parse_or_reject(request):
+    try:
+        return json.loads(request.body or b"{}"), None
+    except json.JSONDecodeError:
+        logger.warning("Malformed webhook payload on %s", request.path)
+        return None, JsonResponse({"ResultCode": 1, "ResultDesc": "Rejected — malformed payload"})
 
 
 @csrf_exempt
@@ -28,14 +35,12 @@ def mpesa_c2b_validation(request):
     Safaricom calls this before confirming a payment, to let the platform
     accept/reject the transaction (e.g. unknown account reference). For
     now we accept everything and let ingest_c2b_confirmation resolve the
-    invoice — a stricter M2 implementation can reject unknown account
+    invoice — a stricter implementation can reject unknown account
     references here instead.
     """
-    try:
-        payload = json.loads(request.body or b"{}")
-    except json.JSONDecodeError:
-        logger.warning("Malformed C2B validation payload")
-        return JsonResponse({"ResultCode": 1, "ResultDesc": "Rejected — malformed payload"})
+    payload, rejection = _parse_or_reject(request)
+    if rejection:
+        return rejection
 
     logger.info("C2B validation received: %s", payload)
     return JsonResponse({"ResultCode": 0, "ResultDesc": "Accepted"})
@@ -45,16 +50,15 @@ def mpesa_c2b_validation(request):
 @require_POST
 def mpesa_c2b_confirmation(request):
     """
-    Safaricom's confirmation callback — the actual payment record. Fired
-    into a Celery task so the HTTP response returns immediately and the
-    ingestion (with its idempotency guard) happens durably in the
-    background, safe to retry if Safaricom redelivers.
+    Safaricom's confirmation callback for manual Paybill-menu payments —
+    the actual payment record. Fired into a Celery task so the HTTP
+    response returns immediately and the ingestion (with its idempotency
+    guard) happens durably in the background, safe to retry if Safaricom
+    redelivers.
     """
-    try:
-        payload = json.loads(request.body or b"{}")
-    except json.JSONDecodeError:
-        logger.warning("Malformed C2B confirmation payload")
-        return JsonResponse({"ResultCode": 1, "ResultDesc": "Rejected — malformed payload"})
+    payload, rejection = _parse_or_reject(request)
+    if rejection:
+        return rejection
 
     ingest_c2b_confirmation.delay(payload)
     return JsonResponse({"ResultCode": 0, "ResultDesc": "Accepted"})
@@ -62,28 +66,67 @@ def mpesa_c2b_confirmation(request):
 
 @csrf_exempt
 @require_POST
-def mpesa_b2c_result(request):
-    """B2C payout result callback — updates a Disbursement's status.
-    TODO(M4): parse payload, dedupe on ConversationID, update Disbursement."""
-    try:
-        payload = json.loads(request.body or b"{}")
-    except json.JSONDecodeError:
-        logger.warning("Malformed B2C result payload")
-        return JsonResponse({"ResultCode": 1, "ResultDesc": "Rejected — malformed payload"})
+def mpesa_stk_callback(request):
+    """
+    STK Push result callback — fired after a tenant enters (or cancels/
+    times out on) their M-Pesa PIN in response to a push we initiated.
+    Correlated back to an Invoice via CheckoutRequestID
+    (billing/tasks.py::ingest_stk_callback), not AccountReference.
+    """
+    payload, rejection = _parse_or_reject(request)
+    if rejection:
+        return rejection
 
-    logger.info("B2C result received (M4 TODO — not yet wired to Disbursement): %s", payload)
+    ingest_stk_callback.delay(payload)
+    return JsonResponse({"ResultCode": 0, "ResultDesc": "Accepted"})
+
+
+@csrf_exempt
+@require_POST
+def mpesa_b2c_result(request):
+    """B2C payout result callback — updates the matching Disbursement's status."""
+    payload, rejection = _parse_or_reject(request)
+    if rejection:
+        return rejection
+
+    from partners.tasks import handle_b2c_result
+
+    handle_b2c_result.delay(payload)
     return JsonResponse({"ResultCode": 0, "ResultDesc": "Accepted"})
 
 
 @csrf_exempt
 @require_POST
 def mpesa_b2c_timeout(request):
-    """B2C payout timeout callback. TODO(M4): mark Disbursement as failed/retry."""
-    try:
-        payload = json.loads(request.body or b"{}")
-    except json.JSONDecodeError:
-        logger.warning("Malformed B2C timeout payload")
-        return JsonResponse({"ResultCode": 1, "ResultDesc": "Rejected — malformed payload"})
+    """B2C payout timeout callback — marks the Disbursement FAILED for manual retry."""
+    payload, rejection = _parse_or_reject(request)
+    if rejection:
+        return rejection
 
-    logger.info("B2C timeout received (M4 TODO — not yet wired to Disbursement): %s", payload)
+    from partners.tasks import handle_b2c_timeout
+
+    handle_b2c_timeout.delay(payload)
+    return JsonResponse({"ResultCode": 0, "ResultDesc": "Accepted"})
+
+
+@csrf_exempt
+@require_POST
+def mpesa_transaction_status_result(request):
+    """Async result of a reconciliation query_transaction_status call."""
+    payload, rejection = _parse_or_reject(request)
+    if rejection:
+        return rejection
+
+    log_transaction_status_result.delay(payload)
+    return JsonResponse({"ResultCode": 0, "ResultDesc": "Accepted"})
+
+
+@csrf_exempt
+@require_POST
+def mpesa_transaction_status_timeout(request):
+    payload, rejection = _parse_or_reject(request)
+    if rejection:
+        return rejection
+
+    log_transaction_status_timeout.delay(payload)
     return JsonResponse({"ResultCode": 0, "ResultDesc": "Accepted"})

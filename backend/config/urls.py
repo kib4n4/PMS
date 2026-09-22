@@ -19,6 +19,7 @@ Including another URLconf
 from django.contrib import admin
 from django.http import JsonResponse
 from django.urls import include, path
+from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 
 
 def healthz(request):
@@ -28,7 +29,15 @@ def healthz(request):
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('healthz/', healthz),
+    path('api/auth/', include('accounts.urls')),
     path('api/', include('leasing.urls')),
+    path('api/', include('billing.urls')),
+    path('api/', include('taxes.urls')),
+    path('api/', include('api_auth.urls')),
+    # API documentation — auto-generated from DRF views/serializers.
+    path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
+    path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
+    path('api/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
     # Public webhook routes — kept on a distinct path group so host Nginx
     # can apply a stricter/separate rate limit, per the design doc.
     path('webhooks/', include('billing.webhook_urls')),

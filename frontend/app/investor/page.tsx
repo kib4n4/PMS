@@ -74,7 +74,7 @@ const quarterlyRevenue = [
 
 export default function InvestorDashboard() {
   return (
-    <DashboardLayout userRole="investor">
+    <DashboardLayout>
       <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-bold text-ink-900">Investor Dashboard</h1>

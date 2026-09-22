@@ -82,7 +82,7 @@ const onboardingPill = {
 
 export default function AdminDashboard() {
   return (
-    <DashboardLayout userRole="admin">
+    <DashboardLayout>
       <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-bold text-ink-900">Admin Console</h1>

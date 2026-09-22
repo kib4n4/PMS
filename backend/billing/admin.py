@@ -2,13 +2,21 @@
 
 from django.contrib import admin
 
-from .models import FeeInvoice, FeeLedgerEntry, Invoice, Payment
+from .models import FeeInvoice, FeeLedgerEntry, Invoice, Payment, STKPushRequest
 
 
 @admin.register(Invoice)
 class InvoiceAdmin(admin.ModelAdmin):
-    list_display = ("id", "lease", "amount_due", "status", "due_date")
+    list_display = ("reference", "lease", "amount_due", "status", "due_date")
     list_filter = ("status",)
+    search_fields = ("reference",)
+
+
+@admin.register(STKPushRequest)
+class STKPushRequestAdmin(admin.ModelAdmin):
+    list_display = ("checkout_request_id", "invoice", "phone_number", "amount", "status", "created_at")
+    list_filter = ("status",)
+    search_fields = ("checkout_request_id", "phone_number")
 
 
 @admin.register(Payment)

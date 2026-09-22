@@ -1,10 +1,16 @@
 # backend/messaging/services.py
 
 import logging
+from typing import Optional
 
 from billing.models import Invoice, InvoiceStatus
-from integrations.daraja import DarajaClient
-from landlords.models import LandlordDarajaCredential, OnboardingStatus
+from billing.services import (
+    InvoiceAlreadyPaidError,
+    LandlordNotReadyError,
+    NoDarajaCredentialError,
+    initiate_invoice_payment,
+)
+from integrations.daraja import DarajaError
 from leasing.models import Lease, LeaseStatus, Tenant
 
 logger = logging.getLogger(__name__)
@@ -24,12 +30,50 @@ class NoOpenInvoiceError(Exception):
     pass
 
 
-class LandlordNotReadyError(Exception):
-    pass
-
-
 def find_tenant_by_phone(phone_number: str):
     return Tenant.objects.select_related("user").filter(user__phone_number=phone_number).first()
+
+
+def find_active_lease_for_tenant(tenant: Tenant) -> Optional[Lease]:
+    return (
+        Lease.objects.filter(tenant=tenant, status=LeaseStatus.ACTIVE)
+        .select_related("unit", "unit__property")
+        .first()
+    )
+
+
+def find_caretaker_for_tenant(tenant: Tenant):
+    """The currently-active CaretakerAssignment for the tenant's
+    property, if any — 'currently active' means effective_end is null."""
+    from caretakers.models import CaretakerAssignment
+
+    lease = find_active_lease_for_tenant(tenant)
+    if lease is None:
+        return None
+
+    assignment = (
+        CaretakerAssignment.objects.filter(property=lease.unit.property, effective_end__isnull=True)
+        .select_related("caretaker__user")
+        .order_by("-effective_start")
+        .first()
+    )
+    return assignment.caretaker if assignment else None
+
+
+def create_maintenance_ticket_for_tenant(tenant: Tenant, description: str, whatsapp_thread_ref: str = ""):
+    """Reported-via-WhatsApp maintenance tickets start unassigned —
+    whoever assigns a caretaker later (admin/landlord) triggers the
+    notification in maintenance/signals.py, so this function doesn't
+    need to know about notification delivery at all."""
+    from maintenance.models import MaintenanceTicket
+
+    lease = find_active_lease_for_tenant(tenant)
+    if lease is None:
+        raise NoActiveLeaseError(f"No active lease for tenant {tenant.id}")
+
+    return MaintenanceTicket.objects.create(
+        unit=lease.unit, tenant=tenant, description=description, whatsapp_thread_ref=whatsapp_thread_ref
+    )
 
 
 def find_open_invoice_for_tenant(tenant: Tenant) -> Invoice:
@@ -54,35 +98,18 @@ def find_open_invoice_for_tenant(tenant: Tenant) -> Invoice:
     return invoice
 
 
-def resolve_landlord_credential(invoice: Invoice) -> LandlordDarajaCredential:
-    """
-    Option B: STK Push always goes through the LANDLORD's own shortcode,
-    never a platform paybill. If the landlord hasn't completed onboarding
-    (LandlordDarajaCredential missing or not yet live/sandbox-ready),
-    that's a real, expected state — not an error to raise past this
-    function.
-    """
-    landlord = invoice.lease.unit.property.landlord
-    try:
-        credential = landlord.daraja_credential
-    except LandlordDarajaCredential.DoesNotExist:
-        raise LandlordNotReadyError(f"Landlord {landlord.id} has no Daraja credential configured")
-
-    if credential.status not in (OnboardingStatus.LIVE, OnboardingStatus.SANDBOX_TESTING):
-        raise LandlordNotReadyError(f"Landlord {landlord.id} Daraja credential is not ready: {credential.status}")
-
-    return credential
-
-
 def trigger_stk_push_for_tenant(phone_number: str) -> dict:
     """
     Core of the WhatsApp 'Pay Rent' flow. Resolves the tenant's active
-    lease and open invoice, resolves the landlord's own paybill
-    credential, and triggers STK Push against it.
+    lease and open invoice, then delegates to
+    billing.services.initiate_invoice_payment — the SAME path the
+    authenticated API uses, so the STKPushRequest correlation record
+    that /webhooks/mpesa/stk/callback/ depends on always gets written,
+    regardless of which entrypoint triggered the push.
 
     Returns a plain dict describing the outcome — never raises on the
     expected "not ready yet" paths (unknown tenant / no lease / no
-    invoice / landlord not onboarded / Daraja not yet wired) since those
+    invoice / landlord not onboarded / Daraja request failed) since those
     are user-facing states the caller needs to message back, not bugs.
     """
     tenant = find_tenant_by_phone(phone_number)
@@ -97,29 +124,17 @@ def trigger_stk_push_for_tenant(phone_number: str) -> dict:
         return {"ok": False, "reason": "no_open_invoice"}
 
     try:
-        credential = resolve_landlord_credential(invoice)
-    except LandlordNotReadyError:
-        return {"ok": False, "reason": "landlord_not_onboarded"}
-
-    client = DarajaClient.for_landlord(credential)
-    try:
-        result = client.initiate_stk_push(
-            phone_number=phone_number,
-            amount=str(invoice.amount_due),
-            account_reference=str(invoice.id),
-        )
-    except NotImplementedError:
-        # Expected until M2: real Daraja credentials/HTTP call aren't
-        # wired yet. This is the intended state for a sandbox/dev
-        # deployment right now, not a bug — log it plainly.
-        logger.info(
-            "STK Push stubbed (pending M2 live Daraja wiring) — tenant=%s invoice=%s shortcode=%s",
-            tenant.id, invoice.id, credential.shortcode,
-        )
-        return {"ok": False, "reason": "stk_push_not_yet_live", "invoice_id": str(invoice.id)}
+        stk_request = initiate_invoice_payment(invoice, phone_number)
+    except (NoDarajaCredentialError, LandlordNotReadyError):
+        return {"ok": False, "reason": "landlord_not_onboarded", "invoice_id": str(invoice.id)}
+    except InvoiceAlreadyPaidError:
+        return {"ok": False, "reason": "no_open_invoice", "invoice_id": str(invoice.id)}
+    except DarajaError:
+        logger.exception("STK Push failed for tenant %s invoice %s", tenant.id, invoice.id)
+        return {"ok": False, "reason": "stk_push_failed", "invoice_id": str(invoice.id)}
 
     return {
         "ok": True,
         "invoice_id": str(invoice.id),
-        "checkout_request_id": result.checkout_request_id,
+        "checkout_request_id": stk_request.checkout_request_id,
     }
