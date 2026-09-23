@@ -3,10 +3,15 @@
 import logging
 from datetime import timedelta
 
+import time
+
 from celery import shared_task
+from django.conf import settings
+from django.core.cache import cache
 from django.utils import timezone
 
 from integrations.resend_client import ResendClient, ResendError
+from integrations.twilio import TwilioClient, TwilioError
 from integrations.whatsapp import WhatsAppClient, WhatsAppError
 
 from . import services
@@ -14,9 +19,40 @@ from .models import EmailMessage, MessageDirection, WhatsAppDeliveryStatus, What
 
 logger = logging.getLogger(__name__)
 
+_MESSAGING_DOWN_BACKOFF_SECONDS = 60
+
 REPORT_ISSUE_TRIGGERS = ("report issue", "report_issue", "issue", "2")
 BALANCE_TRIGGERS = {"balance", "my balance", "3"}
 CARETAKER_TRIGGERS = {"caretaker", "talk to caretaker", "4"}
+
+
+def _messaging_is_disabled(provider: str) -> bool:
+    if provider == "whatsapp":
+        return getattr(settings, "WHATSAPP_ENABLED", True) is False
+    if provider == "twilio":
+        return getattr(settings, "TWILIO_ENABLED", False) is False
+    return False
+
+
+def _record_provider_backoff(provider: str) -> None:
+    cache.set(f"messaging-provider-backoff:{provider}", time.time() + _MESSAGING_DOWN_BACKOFF_SECONDS, timeout=_MESSAGING_DOWN_BACKOFF_SECONDS)
+
+
+def _provider_is_in_backoff(provider: str) -> bool:
+    expiry = cache.get(f"messaging-provider-backoff:{provider}")
+    if not expiry:
+        return False
+    return float(expiry) > time.time()
+
+
+def _friendly_service_failure_message(provider: str) -> str:
+    return getattr(settings, "MESSAGE_SERVICE_DOWN_MESSAGE", "We’re temporarily experiencing delays with our messaging service. Please try again in a few minutes.")
+
+
+def _resolve_outbound_client(provider: str):
+    if provider == "twilio":
+        return TwilioClient.default()
+    return WhatsAppClient.default()
 
 _MENU_REPLY = (
     "Sorry, I didn't understand that. Reply with one of: "
@@ -49,9 +85,14 @@ def send_whatsapp_reply(phone_number: str, body: str, related_object_type: str =
         related_object_id=related_object_id,
     )
     try:
+        if _provider_is_in_backoff("whatsapp"):
+            raise WhatsAppError("WhatsApp outbound is in temporary backoff.")
+        if _messaging_is_disabled("whatsapp"):
+            raise WhatsAppError("WhatsApp messaging is disabled.")
         result = WhatsAppClient.default().send_session_message(phone_number, body)
-    except WhatsAppError:
+    except (WhatsAppError, TwilioError) as exc:
         logger.exception("Failed to send WhatsApp reply to %s", phone_number)
+        _record_provider_backoff("whatsapp")
         message.delivery_status = WhatsAppDeliveryStatus.FAILED
         message.save(update_fields=["delivery_status"])
         return message
@@ -87,9 +128,14 @@ def send_whatsapp_template(
         related_object_id=related_object_id,
     )
     try:
+        if _provider_is_in_backoff("whatsapp"):
+            raise WhatsAppError("WhatsApp outbound is in temporary backoff.")
+        if _messaging_is_disabled("whatsapp"):
+            raise WhatsAppError("WhatsApp messaging is disabled.")
         result = WhatsAppClient.default().send_template_message(phone_number, template.name, variables)
-    except WhatsAppError:
+    except (WhatsAppError, TwilioError) as exc:
         logger.exception("Failed to send WhatsApp template %s to %s", template_name, phone_number)
+        _record_provider_backoff("whatsapp")
         message.delivery_status = WhatsAppDeliveryStatus.FAILED
         message.save(update_fields=["delivery_status"])
         return message

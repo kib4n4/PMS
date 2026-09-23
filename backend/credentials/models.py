@@ -32,6 +32,10 @@ class PlatformCredentialKey(models.TextChoices):
     WHATSAPP_PHONE_NUMBER_ID = "whatsapp_phone_number_id", "WhatsApp Phone Number ID"
     WHATSAPP_VERIFY_TOKEN = "whatsapp_verify_token", "WhatsApp Webhook Verify Token"
     WHATSAPP_APP_SECRET = "whatsapp_app_secret", "WhatsApp App Secret"
+    TWILIO_ACCOUNT_SID = "twilio_account_sid", "Twilio Account SID"
+    TWILIO_AUTH_TOKEN = "twilio_auth_token", "Twilio Auth Token"
+    TWILIO_FROM_NUMBER = "twilio_from_number", "Twilio From Number"
+    TWILIO_WEBHOOK_AUTH_TOKEN = "twilio_webhook_auth_token", "Twilio Webhook Auth Token"
 
 
 class PlatformCredential(models.Model):

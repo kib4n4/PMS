@@ -41,6 +41,15 @@ ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
 # that actually initiates STK Push / B2C payments.
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://api.yourdomain.com")
 
+# Messaging integration feature switches. These allow operators to disable
+# or re-enable a provider without code changes; they also provide safe
+# graceful degradation if a downstream service is unavailable.
+WHATSAPP_ENABLED = os.environ.get("WHATSAPP_ENABLED", "true").lower() == "true"
+TWILIO_ENABLED = os.environ.get("TWILIO_ENABLED", "false").lower() == "true"
+MESSAGE_SERVICE_DOWN_MESSAGE = (
+    "We’re temporarily experiencing delays with our messaging service. "
+    "Please try again in a few minutes."
+)
 
 # Application definition
 
