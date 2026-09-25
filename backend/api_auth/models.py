@@ -28,6 +28,9 @@ class Scope(models.TextChoices):
 
     INVOICES_READ = "invoices:read", "Read landlord invoices"
     PAYMENTS_READ = "payments:read", "Read landlord payments"
+    TICKETS_READ = "tickets:read", "Read landlord maintenance tickets"
+    LEASES_READ = "leases:read", "Read landlord leases"
+    DISBURSEMENTS_READ = "disbursements:read", "Read platform payouts (platform-wide clients only)"
 
 
 class PlatformApiClient(models.Model):
