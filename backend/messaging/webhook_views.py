@@ -156,9 +156,9 @@ def _handle_twilio_inbound(request):
         logger.warning("Twilio webhook rate limit hit for %s", request.META.get("REMOTE_ADDR"))
         return _friendly_service_error_response("Twilio", retry_after_seconds=_TWILIO_RATE_LIMIT_WINDOW_SECONDS)
 
-    twilio_auth_token = get_platform_credential(PlatformCredentialKey.TWILIO_WEBHOOK_AUTH_TOKEN, default="")
+    twilio_auth_token = get_platform_credential(PlatformCredentialKey.TWILIO_AUTH_TOKEN, default="")
     if not twilio_auth_token:
-        logger.warning("TWILIO_WEBHOOK_AUTH_TOKEN not configured; rejecting inbound Twilio webhook.")
+        logger.warning("TWILIO_AUTH_TOKEN not configured; rejecting inbound Twilio webhook.")
         return HttpResponse(status=403)
 
     signature = request.headers.get("X-Twilio-Signature", "")
@@ -166,8 +166,10 @@ def _handle_twilio_inbound(request):
         logger.warning("Missing Twilio request signature.")
         return HttpResponse(status=403)
 
-    full_url = request.build_absolute_uri()
     params = request.POST.copy()
+    full_url = request.build_absolute_uri()
+    logger.debug("Validating Twilio webhook signature for %s", request.META.get("REMOTE_ADDR"))
+
     if not TwilioClient.validate_signature(full_url, params, signature, twilio_auth_token):
         logger.warning("Twilio webhook signature mismatch for %s", request.META.get("REMOTE_ADDR"))
         return HttpResponse(status=403)

@@ -7,6 +7,8 @@ from urllib.parse import parse_qsl, urlsplit
 
 import requests
 
+from integrations import whatsapp
+
 logger = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT_SECONDS = 15
@@ -35,10 +37,13 @@ class TwilioClient:
         from credentials.models import PlatformCredentialKey
         from credentials.services import get_platform_credential
 
+        from_number = get_platform_credential(PlatformCredentialKey.TWILIO_FROM_NUMBER, default="")
+
         return cls(
             account_sid=get_platform_credential(PlatformCredentialKey.TWILIO_ACCOUNT_SID, default=""),
             auth_token=get_platform_credential(PlatformCredentialKey.TWILIO_AUTH_TOKEN, default=""),
-            from_number=get_platform_credential(PlatformCredentialKey.TWILIO_FROM_NUMBER, default=""),
+            from_number=from_number,
+            whatsapp_from=from_number,
         )
 
     @property
