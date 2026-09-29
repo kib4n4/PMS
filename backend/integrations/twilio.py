@@ -1,13 +1,13 @@
+import base64
 import hashlib
 import hmac
 import logging
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import parse_qsl, urlsplit
 
 import requests
 
-from integrations import whatsapp
+
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +42,12 @@ class TwilioClient:
         return cls(
             account_sid=get_platform_credential(PlatformCredentialKey.TWILIO_ACCOUNT_SID, default=""),
             auth_token=get_platform_credential(PlatformCredentialKey.TWILIO_AUTH_TOKEN, default=""),
-            from_number=from_number,
-            whatsapp_from=from_number,
+            from_number=get_platform_credential(PlatformCredentialKey.TWILIO_FROM_NUMBER, default=""),
         )
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.account_sid and self.auth_token and self.from_number)
+        return bool(self.account_sid and self.auth_token)
 
     def send_sms(self, to_phone_number: str, body: str) -> str:
         if not self.is_configured:
@@ -80,13 +79,18 @@ class TwilioClient:
         if not auth_token or not signature:
             return False
 
-        url = urlsplit(url)
-        url_without_query = f"{url.scheme}://{url.netloc}{url.path}"
-        pairs = sorted(parse_qsl(url.query, keep_blank_values=True)) + sorted(params.items(), key=lambda item: item[0])
-        full = url_without_query.encode() + b""
-        for key, value in pairs:
-            full += f"{key}{value}".encode()
-        expected = hmac.new(auth_token.encode(), full, hashlib.sha1).hexdigest()
+        if hasattr(params, "lists"):
+            parameter_items = params.lists()
+        else:
+            parameter_items = ((key, [value]) for key, value in params.items())
+
+        signed_data = url
+        for key, values in sorted(parameter_items):
+            for value in sorted(values):
+                signed_data += f"{key}{value}"
+
+        digest = hmac.new(auth_token.encode("utf-8"), signed_data.encode("utf-8"), hashlib.sha1).digest()
+        expected = base64.b64encode(digest).decode("ascii")
         return hmac.compare_digest(expected, signature)
 
     def parse_inbound_webhook(self, payload: dict, request=None) -> list:

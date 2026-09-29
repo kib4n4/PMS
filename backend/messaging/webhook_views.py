@@ -169,7 +169,6 @@ def _handle_twilio_inbound(request):
     params = request.POST.copy()
     full_url = request.build_absolute_uri()
     logger.debug("Validating Twilio webhook signature for %s", request.META.get("REMOTE_ADDR"))
-
     if not TwilioClient.validate_signature(full_url, params, signature, twilio_auth_token):
         logger.warning("Twilio webhook signature mismatch for %s", request.META.get("REMOTE_ADDR"))
         return HttpResponse(status=403)
