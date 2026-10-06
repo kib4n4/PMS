@@ -13,6 +13,7 @@ from landlords.models import Landlord, LandlordDarajaCredential, Organization
 
 from .daraja import DarajaClient, DarajaError, _TOKEN_CACHE
 from .resend_client import EmailAttachment, ResendClient, ResendError
+from .twilio import TwilioClient
 from .whatsapp import WhatsAppClient, WhatsAppError
 
 
@@ -22,6 +23,32 @@ def _mock_response(json_data, ok=True, status_code=200):
     response.status_code = status_code
     response.json.return_value = json_data
     return response
+
+
+class TwilioSignatureTests(TestCase):
+    def test_validates_base64_signature_with_query_and_repeated_form_values(self):
+        from django.http import QueryDict
+
+        params = QueryDict("Body=world&Body=hello&From=whatsapp%3A%2B1415")
+
+        self.assertTrue(
+            TwilioClient.validate_signature(
+                "https://example.com/webhooks/twilio/?foo=bar",
+                params,
+                "o3AySI2+Da6ZGVqGyutQ8KO00Sc=",
+                "test-auth-token",
+            )
+        )
+
+    def test_rejects_signature_for_different_auth_token(self):
+        self.assertFalse(
+            TwilioClient.validate_signature(
+                "https://example.com/webhooks/twilio/",
+                {"Body": "hello"},
+                "not-a-valid-signature",
+                "test-auth-token",
+            )
+        )
 
 
 class DarajaClientFactoryTests(TestCase):

@@ -160,6 +160,8 @@ CORS_ALLOWED_ORIGINS = [
     for origin in os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:3000").split(",")
     if origin.strip()
 ]
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+USE_X_FORWARDED_HOST = True
 CORS_ALLOW_CREDENTIALS = False
 
 # --- Credential encryption ------------------------------------------------
@@ -184,6 +186,8 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = 'UTC'
+
+
 
 # `manage.py test` has no Redis broker available and doesn't need one —
 # tasks run synchronously, in-process, so `.delay()` calls throughout the
