@@ -269,3 +269,281 @@ class TokenEndpointThrottleTests(APITestCase):
             "/api/oauth/token/", {"client_id": self.client_obj.client_id, "client_secret": self.secret}, format="json"
         )
         self.assertEqual(throttled.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+
+# ---------------------------------------------------------------------------
+# Extended external read API: invoice context, tickets, disbursements, leases
+# ---------------------------------------------------------------------------
+
+from datetime import timedelta  # noqa: E402
+
+from django.utils import timezone  # noqa: E402
+
+from maintenance.models import MaintenanceTicket, TicketStatus  # noqa: E402
+from partners.models import (  # noqa: E402
+    Disbursement,
+    DisbursementRecipientType,
+    DisbursementStatus,
+    PayoutAccount,
+    Reseller,
+)
+
+
+def _external_token(scopes, landlord=None):
+    client_obj, _ = PlatformApiClient.generate(name="Ext Reader", scopes=scopes, landlord=landlord)
+    return issue_client_credentials_token(client_obj)
+
+
+class _ExternalReadTestCase(APITestCase):
+    def setUp(self):
+        self.landlord, self.invoice = _build_landlord_with_invoice("Mine")
+        self.other_landlord, self.other_invoice = _build_landlord_with_invoice("Theirs")
+        # Creating a RESOLVED ticket fires the resolution WhatsApp task, which
+        # fails without a token and sets the provider-backoff cache key; left
+        # behind, that key breaks unrelated messaging tests that run later.
+        self.addCleanup(cache.clear)
+
+    def _get(self, path, token):
+        return self.client.get(path, HTTP_AUTHORIZATION=f"Bearer {token}")
+
+
+class ExternalInvoiceContextTests(_ExternalReadTestCase):
+    def test_invoice_rows_carry_unit_property_tenant_and_days_overdue(self):
+        self.invoice.due_date = timezone.localdate() - timedelta(days=10)
+        self.invoice.save(update_fields=["due_date"])
+        token = _external_token(["invoices:read"], self.landlord)
+
+        row = self._get("/api/external/invoices/", token).data[0]
+
+        self.assertEqual(row["unit_label"], "E1")
+        self.assertEqual(row["property_name"], "Ext Towers")
+        self.assertEqual(row["tenant_name"], "Ext Tenant")
+        self.assertEqual(row["days_overdue"], 10)
+
+    def test_invoice_not_yet_due_has_zero_days_overdue(self):
+        self.invoice.due_date = timezone.localdate() + timedelta(days=3)
+        self.invoice.save(update_fields=["due_date"])
+        token = _external_token(["invoices:read"], self.landlord)
+
+        self.assertEqual(self._get("/api/external/invoices/", token).data[0]["days_overdue"], 0)
+
+    def test_paid_invoice_has_zero_days_overdue(self):
+        self.invoice.due_date = timezone.localdate() - timedelta(days=10)
+        self.invoice.status = "paid"
+        self.invoice.save(update_fields=["due_date", "status"])
+        token = _external_token(["invoices:read"], self.landlord)
+
+        self.assertEqual(self._get("/api/external/invoices/", token).data[0]["days_overdue"], 0)
+
+    def test_invoice_rows_never_expose_a_phone_number(self):
+        token = _external_token(["invoices:read"], self.landlord)
+
+        row = self._get("/api/external/invoices/", token).data[0]
+
+        self.assertNotIn("phone_number", row)
+        self.assertNotIn("tenant_phone", row)
+
+
+def _ticket_for(invoice, description, status_=TicketStatus.OPEN, age_hours=0):
+    ticket = MaintenanceTicket.objects.create(
+        unit=invoice.lease.unit, tenant=invoice.lease.tenant, description=description, status=status_
+    )
+    if age_hours:
+        MaintenanceTicket.objects.filter(pk=ticket.pk).update(created_at=timezone.now() - timedelta(hours=age_hours))
+    return ticket
+
+
+class ExternalTicketListViewTests(_ExternalReadTestCase):
+    def test_scoped_client_sees_only_its_landlords_tickets(self):
+        mine = _ticket_for(self.invoice, "Leaking tap")
+        _ticket_for(self.other_invoice, "Broken door")
+        token = _external_token(["tickets:read"], self.landlord)
+
+        response = self._get("/api/external/tickets/", token)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual({row["id"] for row in response.data}, {str(mine.id)})
+
+    def test_ticket_row_has_unit_age_and_no_tenant_contact_details(self):
+        _ticket_for(self.invoice, "Leaking tap", age_hours=50)
+        token = _external_token(["tickets:read"], self.landlord)
+
+        row = self._get("/api/external/tickets/", token).data[0]
+
+        self.assertEqual(
+            set(row),
+            {"id", "unit_label", "category", "description", "status", "assigned_caretaker", "created_at", "resolved_at", "age_hours"},
+        )
+        self.assertEqual(row["unit_label"], "E1")
+        self.assertIsNone(row["assigned_caretaker"])
+        self.assertAlmostEqual(row["age_hours"], 50, delta=1)
+
+    def test_status_filter_narrows_the_list(self):
+        open_ticket = _ticket_for(self.invoice, "Open one")
+        _ticket_for(self.invoice, "Done one", status_=TicketStatus.RESOLVED)
+        token = _external_token(["tickets:read"], self.landlord)
+
+        response = self._get("/api/external/tickets/?status=open", token)
+
+        self.assertEqual({row["id"] for row in response.data}, {str(open_ticket.id)})
+
+    def test_oldest_ticket_comes_first(self):
+        newer = _ticket_for(self.invoice, "Newer", age_hours=2)
+        older = _ticket_for(self.invoice, "Older", age_hours=90)
+        token = _external_token(["tickets:read"], self.landlord)
+
+        ids = [row["id"] for row in self._get("/api/external/tickets/", token).data]
+
+        self.assertEqual(ids, [str(older.id), str(newer.id)])
+
+    def test_platform_wide_client_gets_empty_list(self):
+        _ticket_for(self.invoice, "Leaking tap")
+        token = _external_token(["tickets:read"], None)
+
+        self.assertEqual(self._get("/api/external/tickets/", token).data, [])
+
+    def test_client_without_scope_is_forbidden(self):
+        token = _external_token(["invoices:read"], self.landlord)
+
+        self.assertEqual(self._get("/api/external/tickets/", token).status_code, status.HTTP_403_FORBIDDEN)
+
+
+def _disbursement(status_=DisbursementStatus.PENDING, amount=500):
+    account = PayoutAccount.objects.create(phone_number="+254700111222")
+    user = User.objects.create_user(username=f"reseller-{Reseller.objects.count()}", role=Role.RESELLER)
+    reseller = Reseller.objects.create(user=user, full_name="Rita Reseller", payout_account=account)
+    return Disbursement.objects.create(
+        recipient_type=DisbursementRecipientType.RESELLER, reseller=reseller, amount=amount, status=status_
+    )
+
+
+class ExternalDisbursementListViewTests(_ExternalReadTestCase):
+    """Payouts are platform-funded and never target a landlord, so unlike the
+    other external endpoints this one is platform-wide only: a landlord-bound
+    client must not see reseller commissions."""
+
+    def test_platform_wide_client_sees_all_disbursements(self):
+        one = _disbursement()
+        two = _disbursement(status_=DisbursementStatus.FAILED, amount=900)
+        token = _external_token(["disbursements:read"], None)
+
+        response = self._get("/api/external/disbursements/", token)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual({row["id"] for row in response.data}, {str(one.id), str(two.id)})
+
+    def test_landlord_bound_client_gets_empty_list(self):
+        _disbursement()
+        token = _external_token(["disbursements:read"], self.landlord)
+
+        self.assertEqual(self._get("/api/external/disbursements/", token).data, [])
+
+    def test_row_shape_has_no_recipient_contact_details(self):
+        _disbursement()
+        token = _external_token(["disbursements:read"], None)
+
+        row = self._get("/api/external/disbursements/", token).data[0]
+
+        self.assertEqual(set(row), {"id", "recipient_type", "recipient_name", "amount", "status", "created_at"})
+        self.assertEqual(row["recipient_name"], "Rita Reseller")
+
+    def test_status_filter_narrows_the_list(self):
+        _disbursement()
+        failed = _disbursement(status_=DisbursementStatus.FAILED)
+        token = _external_token(["disbursements:read"], None)
+
+        response = self._get("/api/external/disbursements/?status=failed", token)
+
+        self.assertEqual({row["id"] for row in response.data}, {str(failed.id)})
+
+    def test_client_without_scope_is_forbidden(self):
+        token = _external_token(["invoices:read"], None)
+
+        self.assertEqual(self._get("/api/external/disbursements/", token).status_code, status.HTTP_403_FORBIDDEN)
+
+
+class ExternalLeaseListViewTests(_ExternalReadTestCase):
+    def _set_end(self, invoice, days):
+        lease = invoice.lease
+        lease.end_date = None if days is None else timezone.localdate() + timedelta(days=days)
+        lease.save(update_fields=["end_date"])
+
+    def test_scoped_client_sees_only_its_landlords_leases(self):
+        token = _external_token(["leases:read"], self.landlord)
+
+        response = self._get("/api/external/leases/", token)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual({row["id"] for row in response.data}, {str(self.invoice.lease_id)})
+
+    def test_row_carries_days_to_end_and_no_tenant_contact_details(self):
+        self._set_end(self.invoice, 45)
+        token = _external_token(["leases:read"], self.landlord)
+
+        row = self._get("/api/external/leases/", token).data[0]
+
+        self.assertEqual(
+            set(row), {"id", "unit_label", "tenant_name", "status", "rent_amount", "end_date", "days_to_end"}
+        )
+        self.assertEqual(row["days_to_end"], 45)
+        self.assertEqual(row["tenant_name"], "Ext Tenant")
+
+    def test_open_ended_lease_has_null_days_to_end(self):
+        self._set_end(self.invoice, None)
+        token = _external_token(["leases:read"], self.landlord)
+
+        self.assertIsNone(self._get("/api/external/leases/", token).data[0]["days_to_end"])
+
+    def test_ending_within_keeps_only_leases_ending_inside_the_window(self):
+        self._set_end(self.invoice, 45)
+        _, far_invoice = _build_landlord_with_invoice("Far")
+        far_invoice.lease.unit.property.landlord = self.landlord
+        far_invoice.lease.unit.property.save()
+        self._set_end(far_invoice, 200)
+        token = _external_token(["leases:read"], self.landlord)
+
+        response = self._get("/api/external/leases/?ending_within=60", token)
+
+        self.assertEqual({row["id"] for row in response.data}, {str(self.invoice.lease_id)})
+
+    def test_ending_within_excludes_open_ended_and_already_ended_leases(self):
+        self._set_end(self.invoice, None)
+        token = _external_token(["leases:read"], self.landlord)
+        self.assertEqual(self._get("/api/external/leases/?ending_within=60", token).data, [])
+
+        self._set_end(self.invoice, -5)
+        self.assertEqual(self._get("/api/external/leases/?ending_within=60", token).data, [])
+
+    def test_ending_within_excludes_terminated_leases(self):
+        self._set_end(self.invoice, 10)
+        self.invoice.lease.status = LeaseStatus.TERMINATED
+        self.invoice.lease.save(update_fields=["status"])
+        token = _external_token(["leases:read"], self.landlord)
+
+        self.assertEqual(self._get("/api/external/leases/?ending_within=60", token).data, [])
+
+    def test_non_numeric_ending_within_is_a_400(self):
+        token = _external_token(["leases:read"], self.landlord)
+
+        self.assertEqual(
+            self._get("/api/external/leases/?ending_within=soon", token).status_code, status.HTTP_400_BAD_REQUEST
+        )
+
+    def test_platform_wide_client_gets_empty_list(self):
+        token = _external_token(["leases:read"], None)
+
+        self.assertEqual(self._get("/api/external/leases/", token).data, [])
+
+    def test_client_without_scope_is_forbidden(self):
+        token = _external_token(["invoices:read"], self.landlord)
+
+        self.assertEqual(self._get("/api/external/leases/", token).status_code, status.HTTP_403_FORBIDDEN)
+
+
+class NewScopeRegistryTests(TestCase):
+    def test_new_scopes_are_grantable(self):
+        client_obj, _ = PlatformApiClient.generate(
+            name="All", scopes=["tickets:read", "disbursements:read", "leases:read"]
+        )
+        for scope in ("tickets:read", "disbursements:read", "leases:read"):
+            self.assertTrue(client_obj.has_scope(scope))
