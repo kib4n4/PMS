@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 _MESSAGING_DOWN_BACKOFF_SECONDS = 60
 
 REPORT_ISSUE_TRIGGERS = ("report issue", "report_issue", "issue", "2")
-BALANCE_TRIGGERS = {"balance", "my balance", "3"}
+BALANCE_TRIGGERS = {"balance", "my balance", "3", "rent", "invoice"}
 CARETAKER_TRIGGERS = {"caretaker", "talk to caretaker", "4"}
 
 
@@ -54,9 +54,21 @@ def _resolve_outbound_client(provider: str):
         return TwilioClient.default()
     return WhatsAppClient.default()
 
-_MENU_REPLY = (
-    "Sorry, I didn't understand that. Reply with one of: "
-    "'Pay Rent', 'Balance', 'Caretaker', or 'Report issue: <description>'."
+
+_TENANT_MENU = (
+    "Welcome back. Reply with one of: "
+    "'rent', 'invoice', 'lease', 'ticket', 'status', or 'help'."
+)
+
+_LANDLORD_MENU = (
+    "Welcome landlord. Reply with one of: "
+    "'onboard tenant: Name | Phone | Property | Unit | Rent | Start Date | End Date', "
+    "'portfolio', 'tenants', 'status', 'help'."
+)
+
+_UNKNOWN_USER_MENU = (
+    "Welcome to Dime PMS. We couldn't match this WhatsApp number to a registered tenant or landlord. "
+    "To onboard a tenant, send: 'onboard tenant: Name | Phone | Property | Unit | Rent | Start Date | End Date'."
 )
 
 _PAY_RENT_OUTCOME_MESSAGES = {
@@ -162,14 +174,144 @@ def handle_whatsapp_status_update(message_id: str, status_value: str):
         logger.info("handle_whatsapp_status_update: no message found for meta_message_id=%s", message_id)
 
 
+def _handle_role_unknown(phone_number: str, body: str, normalized: str) -> dict:
+    if normalized in {"hi", "hello", "start", "welcome"}:
+        send_whatsapp_reply(phone_number, _UNKNOWN_USER_MENU)
+        return {"ok": False, "reason": "unknown_role"}
+
+    if normalized.startswith("onboard tenant") or normalized.startswith("add tenant"):
+        send_whatsapp_reply(
+            phone_number,
+            "This WhatsApp number is not registered as a landlord yet. Please register a landlord account in the PMS before onboarding tenants.",
+        )
+        return {"ok": False, "reason": "missing_landlord_record"}
+
+    if normalized in {"help", "menu"}:
+        send_whatsapp_reply(phone_number, _UNKNOWN_USER_MENU)
+        return {"ok": False, "reason": "unknown_role"}
+
+    logger.info("Unclassified WhatsApp message from %s: %r", phone_number, body)
+    send_whatsapp_reply(phone_number, _UNKNOWN_USER_MENU)
+    return {"ok": False, "reason": "unclassified_intent"}
+
+
+def _handle_tenant_message(phone_number: str, body: str, normalized: str) -> dict:
+    if normalized in {"hi", "hello", "start", "menu", "help"}:
+        send_whatsapp_reply(phone_number, _TENANT_MENU)
+        return {"ok": True, "role": "tenant"}
+
+    if normalized in {"rent", "balance", "my balance", "3"}:
+        return _handle_balance_inquiry(phone_number)
+
+    if normalized in {"invoice", "invoices", "last invoice"}:
+        tenant = services.find_tenant_by_phone(phone_number)
+        if tenant is None:
+            send_whatsapp_reply(phone_number, _PAY_RENT_OUTCOME_MESSAGES["unknown_tenant"])
+            return {"ok": False, "reason": "unknown_tenant"}
+        lease = services.find_active_lease_for_tenant(tenant)
+        if lease is None:
+            send_whatsapp_reply(phone_number, _PAY_RENT_OUTCOME_MESSAGES["no_active_lease"])
+            return {"ok": False, "reason": "no_active_lease"}
+        invoices = list(
+            services.Invoice.objects.filter(lease=lease).order_by("-due_date")[:5]
+        ) if hasattr(services, 'Invoice') else []
+        if not invoices:
+            send_whatsapp_reply(phone_number, "You have no invoice history yet.")
+            return {"ok": False, "reason": "no_invoice_history"}
+        lines = [f"Latest invoices for {lease.unit.property.name} / {lease.unit.label}:"]
+        for invoice in invoices:
+            balance = invoice.amount_due - invoice.amount_paid
+            lines.append(f"- Invoice {invoice.reference}: KES {balance:,.2f} due {invoice.due_date}")
+        send_whatsapp_reply(phone_number, "\n".join(lines))
+        return {"ok": True, "role": "tenant"}
+
+    if normalized in {"lease", "my lease"}:
+        tenant = services.find_tenant_by_phone(phone_number)
+        if tenant is None:
+            send_whatsapp_reply(phone_number, _PAY_RENT_OUTCOME_MESSAGES["unknown_tenant"])
+            return {"ok": False, "reason": "unknown_tenant"}
+        lease = services.find_active_lease_for_tenant(tenant)
+        if lease is None:
+            send_whatsapp_reply(phone_number, _PAY_RENT_OUTCOME_MESSAGES["no_active_lease"])
+            return {"ok": False, "reason": "no_active_lease"}
+        body_text = (
+            f"Your active lease is for {lease.unit.property.name} / {lease.unit.label}. "
+            f"Rent: KES {lease.rent_amount:,.2f}. Start: {lease.start_date}. End: {lease.end_date or 'Open ended'}."
+        )
+        send_whatsapp_reply(phone_number, body_text)
+        return {"ok": True, "role": "tenant"}
+
+    if normalized in {"ticket", "report issue", "report_issue", "issue"}:
+        return _handle_report_issue(phone_number, body, "report issue", "")
+
+    if normalized in {"status", "summary"}:
+        tenant = services.find_tenant_by_phone(phone_number)
+        if tenant is None:
+            send_whatsapp_reply(phone_number, _PAY_RENT_OUTCOME_MESSAGES["unknown_tenant"])
+            return {"ok": False, "reason": "unknown_tenant"}
+        try:
+            invoice = services.find_open_invoice_for_tenant(tenant)
+            balance = invoice.amount_due - invoice.amount_paid
+            lease = services.find_active_lease_for_tenant(tenant)
+            unit_label = lease.unit.label if lease else "N/A"
+            send_whatsapp_reply(phone_number, f"Status: active unit {unit_label}. Outstanding balance: KES {balance:,.2f}.")
+            return {"ok": True, "role": "tenant"}
+        except (services.NoActiveLeaseError, services.NoOpenInvoiceError):
+            send_whatsapp_reply(phone_number, "You have no active lease or outstanding invoice on file.")
+            return {"ok": False, "reason": "no_status"}
+
+    logger.info("Unclassified tenant WhatsApp message from %s: %r", phone_number, body)
+    send_whatsapp_reply(phone_number, _TENANT_MENU)
+    return {"ok": False, "reason": "unclassified_intent"}
+
+
+def _handle_landlord_message(phone_number: str, body: str, normalized: str, landlord) -> dict:
+    if normalized in {"hi", "hello", "start", "menu", "help"}:
+        send_whatsapp_reply(phone_number, _LANDLORD_MENU)
+        return {"ok": True, "role": "landlord"}
+
+    if "onboard tenant" in normalized or "add tenant" in normalized:
+        try:
+            result = services.onboard_tenant_for_landlord(landlord, body)
+        except services.InvalidOnboardingPayloadError as exc:
+            send_whatsapp_reply(phone_number, str(exc))
+            return {"ok": False, "reason": "invalid_onboarding_payload"}
+        send_whatsapp_reply(
+            phone_number,
+            (
+                f"Tenant {result['tenant_name']} has been onboarded to {result['property_name']} / {result['unit_label']}. "
+                f"Rent: KES {result['rent_amount']}."
+            ),
+            related_object_type="Tenant",
+            related_object_id=result["tenant_id"],
+        )
+        return {"ok": True, "role": "landlord", "tenant_id": result["tenant_id"]}
+
+    if normalized in {"portfolio", "tenants", "properties", "status"}:
+        properties = landlord.properties.all().prefetch_related("units")
+        property_count = properties.count()
+        tenant_count = services.Tenant.objects.filter(leases__unit__property__landlord=landlord).distinct().count()
+        send_whatsapp_reply(
+            phone_number,
+            f"Portfolio summary: {property_count} properties, {tenant_count} tenants. Reply 'onboard tenant: Name | Phone | Property | Unit | Rent | Start Date | End Date' to add a new tenant.",
+        )
+        return {"ok": True, "role": "landlord"}
+
+    if normalized in {"help", "menu"}:
+        send_whatsapp_reply(phone_number, _LANDLORD_MENU)
+        return {"ok": True, "role": "landlord"}
+
+    logger.info("Unclassified landlord WhatsApp message from %s: %r", phone_number, body)
+    send_whatsapp_reply(phone_number, _LANDLORD_MENU)
+    return {"ok": False, "reason": "unclassified_intent"}
+
+
 @shared_task
 def handle_inbound_whatsapp_message(phone_number: str, body: str, message_id: str = ""):
     """
     Entry point for every inbound WhatsApp message. Logs it for the audit
     trail, classifies intent, and dispatches to the matching flow:
-    Pay Rent, Report Issue, My Balance, or Talk to Caretaker. Anything
-    unclassified is logged for human follow-up rather than silently
-    dropped or auto-replied to with a guess.
+    tenant, landlord, rent payment, issue reporting, or generic guidance.
     """
     WhatsAppMessage.objects.create(
         direction=MessageDirection.INBOUND,
@@ -179,6 +321,25 @@ def handle_inbound_whatsapp_message(phone_number: str, body: str, message_id: st
     )
 
     normalized = body.strip().lower()
+
+    role, profile = services.find_role_by_phone(phone_number)
+
+    if role == "tenant":
+        return _handle_tenant_message(phone_number, body, normalized)
+
+    if role == "landlord":
+        return _handle_landlord_message(phone_number, body, normalized, profile)
+
+    if normalized in {"hi", "hello", "start", "welcome", "help", "menu"}:
+        send_whatsapp_reply(phone_number, _UNKNOWN_USER_MENU)
+        return {"ok": False, "reason": "unknown_role"}
+
+    if normalized.startswith("onboard tenant") or normalized.startswith("add tenant"):
+        send_whatsapp_reply(
+            phone_number,
+            "This WhatsApp number is not registered as a landlord yet. Please contact the platform admin or register a landlord account before onboarding tenants.",
+        )
+        return {"ok": False, "reason": "missing_landlord_record"}
 
     if normalized in services.PAY_RENT_TRIGGERS:
         result = services.trigger_stk_push_for_tenant(phone_number)
@@ -195,9 +356,7 @@ def handle_inbound_whatsapp_message(phone_number: str, body: str, message_id: st
         if normalized == trigger or normalized.startswith(f"{trigger}:") or normalized.startswith(f"{trigger} "):
             return _handle_report_issue(phone_number, body, trigger, message_id)
 
-    logger.info("Unclassified WhatsApp message from %s: %r", phone_number, body)
-    send_whatsapp_reply(phone_number, _MENU_REPLY)
-    return {"ok": False, "reason": "unclassified_intent"}
+    return _handle_role_unknown(phone_number, body, normalized)
 
 
 def _reply_for_pay_rent_outcome(phone_number: str, result: dict):
