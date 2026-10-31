@@ -10,6 +10,7 @@ import KPICard from "@/components/KPICard";
 import ChartCard from "@/components/ChartCard";
 import DashedRule from "@/components/DashedRule";
 import DataTable from "@/components/DataTable";
+import RoleActionBar, { type RoleAction } from "@/components/RoleActionBar";
 import { BuildingIcon, UsersIcon, WrenchIcon, ClockIcon } from "@/components/Icons";
 
 type OnboardingRow = { landlord: string; shortcode: string; status: string; date: string };
@@ -36,6 +37,13 @@ const roleLabels: Record<string, string> = {
   reseller: "Reseller", investor: "Investor", caretaker: "Caretaker",
 };
 
+const adminActions: RoleAction[] = [
+  { label: "Manage users", href: "/admin/users", variant: "primary" },
+  { label: "Onboarding queue", href: "/admin/onboarding", variant: "secondary" },
+  { label: "Fee reconciliation", href: "/admin/reconciliation", variant: "secondary" },
+  { label: "Audit log", href: "/admin/audit", variant: "ghost" },
+];
+
 function statusLabel(status: string): string {
   return status.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
@@ -46,9 +54,12 @@ export default function AdminDashboard() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <div>
-          <h1 className="font-serif text-[28px] font-medium text-ink-900">Admin Console</h1>
-          <p className="mt-1 text-sm text-ink-600">Platform operations, onboarding, and audit trail.</p>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h1 className="font-serif text-[28px] font-medium text-ink-900">Admin Console</h1>
+            <p className="mt-1 text-sm text-ink-600">Platform operations, onboarding, and audit trail.</p>
+          </div>
+          <RoleActionBar actions={adminActions} />
         </div>
 
         {isLoading && <DashboardLoading />}
@@ -62,8 +73,6 @@ export default function AdminDashboard() {
 function AdminDashboardBody({ data }: { data: AdminDashboardData }) {
   const roleEntries = Object.entries(data.usersByRole);
 
-  // One deliberate motion moment for this view: role tiles stamp in
-  // one-by-one rather than all appearing at once.
   const [stamped, setStamped] = useState(false);
   useEffect(() => {
     const t = requestAnimationFrame(() => setStamped(true));

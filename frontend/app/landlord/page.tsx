@@ -11,6 +11,7 @@ import KPICard from "@/components/KPICard";
 import ChartCard from "@/components/ChartCard";
 import DashedRule from "@/components/DashedRule";
 import DataTable from "@/components/DataTable";
+import RoleActionBar, { type RoleAction } from "@/components/RoleActionBar";
 import { BuildingIcon, UsersIcon, TrendingUpIcon, WrenchIcon } from "@/components/Icons";
 
 type PaymentRow = { id: string; tenant: string; unit: string; amount: number; date: string };
@@ -34,6 +35,14 @@ type LandlordDashboardData = {
   maintenanceTickets: TicketRow[];
 };
 
+const landlordActions: RoleAction[] = [
+  { label: "Add property", href: "/landlord/properties/new", variant: "primary" },
+  { label: "Add unit", href: "/landlord/units/new", variant: "secondary" },
+  { label: "Create lease", href: "/landlord/leases/new", variant: "secondary" },
+  { label: "Send reminders", href: "/landlord/reminders", variant: "secondary" },
+  { label: "Maintenance queue", href: "/landlord/maintenance", variant: "ghost" },
+];
+
 const statusPill: Record<string, string> = {
   open: "bg-rust-100 text-rust-800",
   assigned: "bg-amber-100 text-amber-800",
@@ -48,9 +57,12 @@ export default function LandlordDashboard() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <div>
-          <h1 className="font-serif text-[28px] font-medium text-ink-900">Landlord Dashboard</h1>
-          <p className="mt-1 text-sm text-ink-600">Overview of your properties, tenants, and revenue.</p>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h1 className="font-serif text-[28px] font-medium text-ink-900">Landlord Dashboard</h1>
+            <p className="mt-1 text-sm text-ink-600">Overview of your properties, tenants, and revenue.</p>
+          </div>
+          <RoleActionBar actions={landlordActions} />
         </div>
 
         {isLoading && <DashboardLoading />}
@@ -155,8 +167,6 @@ function LandlordDashboardBody({ data }: { data: LandlordDashboardData }) {
 }
 
 function RevenueChart({ data }: { data: MonthPoint[] }) {
-  // The one deliberate motion moment for this view: bars grow from zero
-  // on mount rather than appearing instantly.
   const [grown, setGrown] = useState(false);
   useEffect(() => {
     const t = requestAnimationFrame(() => setGrown(true));
