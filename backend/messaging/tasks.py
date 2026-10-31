@@ -2,7 +2,6 @@
 
 import logging
 from datetime import timedelta
-
 import time
 
 from celery import shared_task
@@ -10,6 +9,7 @@ from django.conf import settings
 from django.core.cache import cache
 from django.utils import timezone
 
+from billing.models import Invoice
 from integrations.resend_client import ResendClient, ResendError
 from integrations.twilio import TwilioClient, TwilioError
 from integrations.whatsapp import WhatsAppClient, WhatsAppError
@@ -81,14 +81,7 @@ _PAY_RENT_OUTCOME_MESSAGES = {
 
 
 def send_whatsapp_reply(phone_number: str, body: str, related_object_type: str = "", related_object_id: str = ""):
-    """
-    Every outbound WhatsApp reply goes through here: write the audit
-    record first (so we always have a trail even if the send itself
-    fails), then attempt real delivery via the Cloud API and update the
-    record's delivery_status with the outcome. Free-form session message
-    only — works within Meta's 24h customer-initiated window; use
-    send_whatsapp_template for anything outside that window.
-    """
+    """Persist and send a session message, tracking delivery status."""
     message = WhatsAppMessage.objects.create(
         direction=MessageDirection.OUTBOUND,
         phone_number=phone_number,
@@ -117,15 +110,7 @@ def send_whatsapp_reply(phone_number: str, body: str, related_object_type: str =
 def send_whatsapp_template(
     phone_number: str, template_name: str, variables: dict, *, related_object_type: str = "", related_object_id: str = ""
 ):
-    """
-    Sends a pre-approved WhatsApp template message — unlike
-    send_whatsapp_reply, works outside Meta's 24h session window, and
-    (unlike every other send path today) actually sets
-    WhatsAppMessage.template_used, which existed from day one but nothing
-    ever populated. Raises services.TemplateNotApprovedError if no
-    APPROVED version of `template_name` exists — callers decide whether
-    that's fatal or skippable (see send_rent_reminders below).
-    """
+    """Send a pre-approved template message for reminders and framework notifications."""
     template = services.resolve_approved_template(template_name)
     rendered_body = template.body
     for key, value in variables.items():
@@ -159,12 +144,7 @@ def send_whatsapp_template(
 
 @shared_task
 def handle_whatsapp_status_update(message_id: str, status_value: str):
-    """
-    Meta's delivery-status webhook callback. Previously delivery_status
-    was only ever set locally, once, at send time, based on whether our
-    own HTTP call to Meta succeeded — never updated to reflect what
-    actually happened on the wire (delivered/read/failed-per-Meta).
-    """
+    """Update a message's delivery status when Meta sends the status callback."""
     if status_value not in WhatsAppDeliveryStatus.values:
         logger.warning("handle_whatsapp_status_update: unrecognized status %r for %s", status_value, message_id)
         return
@@ -212,9 +192,7 @@ def _handle_tenant_message(phone_number: str, body: str, normalized: str) -> dic
         if lease is None:
             send_whatsapp_reply(phone_number, _PAY_RENT_OUTCOME_MESSAGES["no_active_lease"])
             return {"ok": False, "reason": "no_active_lease"}
-        invoices = list(
-            services.Invoice.objects.filter(lease=lease).order_by("-due_date")[:5]
-        ) if hasattr(services, 'Invoice') else []
+        invoices = Invoice.objects.filter(lease=lease).order_by("-due_date")[:5]
         if not invoices:
             send_whatsapp_reply(phone_number, "You have no invoice history yet.")
             return {"ok": False, "reason": "no_invoice_history"}
@@ -241,7 +219,11 @@ def _handle_tenant_message(phone_number: str, body: str, normalized: str) -> dic
         send_whatsapp_reply(phone_number, body_text)
         return {"ok": True, "role": "tenant"}
 
-    if normalized in {"ticket", "report issue", "report_issue", "issue"}:
+    if normalized in {"ticket", "issue"}:
+        send_whatsapp_reply(phone_number, "Please describe the issue, e.g. 'Report issue: leaking kitchen tap'.")
+        return {"ok": False, "reason": "missing_description"}
+
+    if normalized in {"report issue", "report_issue"}:
         return _handle_report_issue(phone_number, body, "report issue", "")
 
     if normalized in {"status", "summary"}:
@@ -280,7 +262,7 @@ def _handle_landlord_message(phone_number: str, body: str, normalized: str, land
             phone_number,
             (
                 f"Tenant {result['tenant_name']} has been onboarded to {result['property_name']} / {result['unit_label']}. "
-                f"Rent: KES {result['rent_amount']}."
+                f"Rent: KES {result['rent_amount']} ."
             ),
             related_object_type="Tenant",
             related_object_id=result["tenant_id"],
@@ -308,11 +290,7 @@ def _handle_landlord_message(phone_number: str, body: str, normalized: str, land
 
 @shared_task
 def handle_inbound_whatsapp_message(phone_number: str, body: str, message_id: str = ""):
-    """
-    Entry point for every inbound WhatsApp message. Logs it for the audit
-    trail, classifies intent, and dispatches to the matching flow:
-    tenant, landlord, rent payment, issue reporting, or generic guidance.
-    """
+    """Entry point for every inbound WhatsApp message and dispatcher for tenant/landlord flows."""
     WhatsAppMessage.objects.create(
         direction=MessageDirection.INBOUND,
         phone_number=phone_number,
@@ -414,7 +392,7 @@ def _handle_report_issue(phone_number: str, raw_body: str, matched_trigger: str,
         return {"ok": False, "reason": "unknown_tenant"}
 
     normalized = raw_body.strip()
-    remainder = normalized[len(matched_trigger):].lstrip(" :-–")
+    remainder = normalized[len(matched_trigger):].lstrip(" :-–") if matched_trigger else normalized.strip()
     if not remainder:
         send_whatsapp_reply(
             phone_number, "Please describe the issue, e.g. 'Report issue: leaking kitchen tap'."
@@ -438,15 +416,8 @@ def _handle_report_issue(phone_number: str, raw_body: str, matched_trigger: str,
 
 @shared_task
 def send_rent_reminders(days_before_due: int = 3):
-    """
-    Proactive outbound flow — previously nothing sent a rent reminder at
-    all; NotificationTemplate existed but nothing used it (see
-    send_whatsapp_template). Sends one 'rent_reminder' template message
-    per still-open invoice due within `days_before_due` days (or already
-    overdue), skipping an invoice already reminded today so a retry of
-    this task (or a shorter Beat interval) can't spam a tenant.
-    """
-    from billing.models import Invoice, InvoiceStatus
+    """Send reminder templates for invoices due soon or already overdue."""
+    from billing.models import InvoiceStatus
 
     today = timezone.now().date()
     cutoff = today + timedelta(days=days_before_due)
@@ -496,11 +467,7 @@ def send_email_notification(
     to_email: str, subject: str, html: str, text: str = "",
     related_object_type: str = "", related_object_id: str = "",
 ):
-    """
-    Generic outbound email — logs to EmailMessage regardless of Resend
-    outcome, so delivery failures are still auditable, same pattern as
-    send_whatsapp_reply above.
-    """
+    """Send an email and record the delivery attempt and result."""
     if not to_email:
         logger.warning("send_email_notification: no recipient email for %s %s", related_object_type, related_object_id)
         return
